@@ -13,7 +13,7 @@ from sqlalchemy.sql import _orm_types
 
 
 class SQLStatus:
-    """SQLalchemy返回的状态枚举"""
+    """SQLalchemy 返回的状态枚举。"""
 
     OK = 0
     SQL_ERR = 1
@@ -26,7 +26,6 @@ ModelTypeVar = TypeVar("ModelTypeVar", bound=Model)
 ResultTypeVar = TypeVar("ResultTypeVar", covariant=True)
 EntityTypeVar = TypeVar("EntityTypeVar", covariant=True)
 
-
 ErrorLogger = Callable[[str], None]
 _error_logger: ErrorLogger = logging.getLogger("CRUD").error
 
@@ -34,13 +33,13 @@ _error_logger: ErrorLogger = logging.getLogger("CRUD").error
 def _get_session_for_cls(crud_cls: Type["CRUD"]) -> Any:
     """根据 CRUD 类获取当前配置的会话对象。
 
-    依赖外部通过 configure_crud 或 CRUD.configure 预先设置 session。
+    依赖外部通过 CRUD.configure 预先设置 session。
     """
     session = getattr(crud_cls, "session", None)
     if session is None:
         raise RuntimeError(
             "CRUD session is not configured. "
-            "Please call configure_crud(session=...) or CRUD.configure(session=...)."
+            "Please call CRUD.configure(session=...) before using CRUD."
         )
     return session
 
@@ -151,11 +150,11 @@ class _TransactionScope:
 
 
 class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar]):
-    """Query 包装器
+    """Query 包装器。
 
-    - 保留 SQLAlchemy 原生 Query 功能，同时增加类型提示与链式体验
-    - 通过 __getattr__ 委托未覆盖的方法，确保与既有代码兼容
-    - 终结方法（first/all/...）直接调用底层 Query，实现一致的行为
+    - 保留 SQLAlchemy 原生 Query 功能，同时增加类型提示与链式体验。
+    - 通过 __getattr__ 委托未覆盖的方法，确保与既有代码兼容。
+    - 终结方法（first/all/...）直接调用底层 Query。
     """
 
     __slots__ = ("_crud", "_query")
@@ -166,7 +165,7 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar]):
 
     @property
     def query(self) -> Query:
-        """返回底层 SQLAlchemy Query"""
+        """返回底层 SQLAlchemy Query。"""
         return self._query
 
     def _wrap(self, query: Query) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
@@ -297,30 +296,24 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar]):
 
 
 class CRUD(Generic[ModelTypeVar]):
+    """通用 CRUD 封装。
+
+    - 基于上下文管理器的事务提交/回滚。
+    - 请求级根事务共享（同一请求内的多个 CRUD 实例共享事务）。
+    - 统一错误状态管理（SQLStatus）。
+    - 全局与实例级默认过滤条件。
+    """
+
     _global_filter_conditions: tuple[list, dict] = ([], {})
     _CTX_KEY = "_crud_v3_ctx"
-    # 由外部通过 configure_crud / CRUD.configure 注册的会话对象
     session: Any | None = None
 
     @classmethod
     def register_global_filters(cls, *base_exprs, **base_kwargs) -> None:
-        """为所有模型注册全局基础过滤。
-
-        Args:
-            *base_exprs: 需要通过 filter 应用的表达式（SQLAlchemy 二元表达式）。
-            **base_kwargs: 需要通过 filter_by 应用的键值条件。
-        """
+        """为所有模型注册全局基础过滤。"""
         cls._global_filter_conditions = (list(base_exprs) or []), (base_kwargs or {})
 
     def __init__(self, model: Type[ModelTypeVar], **kwargs) -> None:
-        """初始化 CRUD 实例。
-
-        - 实例默认条件由 `**kwargs` 指定，默认通过 filter_by 自动应用于查询；同时也作为 create_instance() 的默认字段。
-
-        Args:
-            model: SQLAlchemy 模型类。
-            **kwargs: 实例默认条件（filter_by），与实例默认属性（创建时）。
-        """
         self._txn = None
         self._model = model
         self._kwargs = kwargs
@@ -341,8 +334,6 @@ class CRUD(Generic[ModelTypeVar]):
         self._discarded = False
 
     def __enter__(self) -> "CRUD[ModelTypeVar]":
-        """进入上下文管理器。"""
-        # 确保请求级根事务存在（请求内共享）
         self._ensure_root_txn()
         self._explicit_committed = False
         self._discarded = False
@@ -355,18 +346,7 @@ class CRUD(Generic[ModelTypeVar]):
         session: Any | None = None,
         error_logger: ErrorLogger | None = None,
     ) -> None:
-        """配置 CRUD 所依赖的会话与日志函数（类级别）。
-
-        一般推荐在应用初始化阶段调用一次，例如：
-
-        ```python
-        from app.core.database import db
-        from app.utils.logger import Log
-        from app.services.crud_service import CRUD
-
-        CRUD.configure(session=db.session, error_logger=Log.error)
-        ```
-        """
+        """配置 CRUD 所依赖的会话与日志函数（类级别）。"""
         if session is not None:
             cls.session = session
         if error_logger is not None:
@@ -378,33 +358,13 @@ class CRUD(Generic[ModelTypeVar]):
         raise_on_error: bool | None = None,
         disable_global_filter: bool | None = None,
     ) -> "CRUD[ModelTypeVar]":
-        """配置 CRUD 行为。
-
-        Args:
-            raise_on_error: 是否在内部捕获错误时抛出异常（默认 False）。
-            disable_global_filter: True 则临时禁用全局过滤。
-
-        Returns:
-            self（便于链式调用）。
-        """
         if raise_on_error is not None:
             self._raise_on_error = raise_on_error
-
         if disable_global_filter is not None:
             self._apply_global_filters = not disable_global_filter
         return self
 
     def create_instance(self, no_attach: bool = False) -> ModelTypeVar:
-        """创建模型实例。
-
-        - 若 `no_attach=True`，仅构造实例而不附加到当前类的实例内。
-
-        Args:
-            no_attach: 是否不附加到当前实例内。
-
-        Returns:
-            创建的模型实例。
-        """
         if no_attach:
             return self._model(**self._kwargs)
         if self.instance is None:
@@ -413,38 +373,27 @@ class CRUD(Generic[ModelTypeVar]):
 
     @overload
     def add(self, instances: None = None, **kwargs) -> Optional[ModelTypeVar]: ...
+
     @overload
     def add(
         self, instances: list[ModelTypeVar], **kwargs
     ) -> Optional[list[ModelTypeVar]]: ...
+
     @overload
     def add(self, instances: ModelTypeVar, **kwargs) -> Optional[ModelTypeVar]: ...
+
     def add(
         self, instances: ModelTypeVar | list[ModelTypeVar] | None = None, **kwargs
     ) -> list[ModelTypeVar] | ModelTypeVar | None:
-        """添加记录。
-
-        - 当不给定 `instances` 时，将使用 `create_instance()` 创建单个实例。
-        - 若传入实例列表，会逐个更新属性（`**kwargs`）并统一 add_all。
-
-        Args:
-            instances: 预创建的单个实例或实例列表；不提供时将使用 `create_instance()`。
-            **kwargs: 需批量设置到实例上的属性。
-
-        Returns:
-            创建的实例或实例列表；失败时返回 None。
-        """
         try:
             instances = instances or self.create_instance()
             if not isinstance(instances, list):
                 instances = [instances]
 
-            # 写操作：懒开启子事务
             self._ensure_sub_txn()
 
             managed_instances: list[ModelTypeVar] = []
             for instance in instances:
-                # 仅在实例不是瞬态或绑定到其他会话时进行 merge
                 need_merge = False
                 try:
                     if not (insp := sa_inspect(instance)):
@@ -478,19 +427,8 @@ class CRUD(Generic[ModelTypeVar]):
         return None
 
     def query(
-        self, *args, pure=False, **kwargs
+        self, *args, pure: bool = False, **kwargs
     ) -> CRUDQuery[ModelTypeVar, ModelTypeVar]:
-        """������ѯ
-
-        Args:
-            *args: ͨ�� `filter` ���ӵ� SQLAlchemy ����ʽ��
-            pure: True ʱ����ȫ�ֹ�����ʵ��Ĭ��������ֱ�Ӵӡ��ɾ���㡱������
-            **kwargs: ͨ�� `filter_by` ���ӵļ�ֵ������
-
-        Returns:
-            CRUDQuery ����, ����֧��链式���ɣ�
-        """
-        # ÿ�δӡ��ɾ����� self._model.query ��ʼ
         query = self._model.query
         if not pure:
             if self._instance_default_kwargs:
@@ -519,14 +457,6 @@ class CRUD(Generic[ModelTypeVar]):
     def first(
         self, query: CRUDQuery[ModelTypeVar, ModelTypeVar] | None = None
     ) -> ModelTypeVar | None:
-        """获取第一条记录。
-
-        Args:
-            query: 预构建的 CRUDQuery，可选。
-
-        Returns:
-            第一条记录或 None。
-        """
         if query is None:
             query = self.query()
         return query.first()
@@ -534,14 +464,6 @@ class CRUD(Generic[ModelTypeVar]):
     def all(
         self, query: CRUDQuery[ModelTypeVar, ModelTypeVar] | None = None
     ) -> list[ModelTypeVar]:
-        """获取所有记录。
-
-        Args:
-            query: 预构建的 CRUDQuery，可选。
-
-        Returns:
-            记录列表。
-        """
         if query is None:
             query = self.query()
         return query.all()
@@ -549,15 +471,6 @@ class CRUD(Generic[ModelTypeVar]):
     def update(
         self, instance: ModelTypeVar | None = None, **kwargs
     ) -> ModelTypeVar | None:
-        """更新记录。若未提供 `instance`，则按当前默认查询条件查找第一条并更新。
-
-        Args:
-            instance: 要更新的实例，可选。
-            **kwargs: 要更新的属性键值。
-
-        Returns:
-            更新后的实例，若不存在返回 None。
-        """
         try:
             if instance is None:
                 instance = self.query().first()
@@ -565,7 +478,6 @@ class CRUD(Generic[ModelTypeVar]):
             if not instance:
                 return None
 
-            # 写操作：懒开启子事务，并避免中途自动 flush
             self._ensure_sub_txn()
             with self.session.no_autoflush:
                 for k, v in kwargs.items():
@@ -584,25 +496,11 @@ class CRUD(Generic[ModelTypeVar]):
         self,
         instance: ModelTypeVar | None = None,
         query: CRUDQuery[ModelTypeVar, ModelTypeVar] | None = None,
-        all_records=False,
+        all_records: bool = False,
         sync: _orm_types.SynchronizeSessionArgument = "fetch",
     ) -> bool:
-        """删除记录。
-
-        - 若提供 `instance`，直接删除该实例。
-        - 否则按查询条件删除第一条或全部匹配记录。
-
-        Args:
-            instance: 要删除的实例，可选。
-            query: 预构建的 CRUDQuery，可选。
-            all_records: True 时删除所有匹配记录，否则仅删除第一条。
-
-        Returns:
-            删除是否成功。
-        """
         try:
             if instance:
-                # 写操作：懒开启子事务
                 self._ensure_sub_txn()
                 self.session.delete(instance)
             else:
@@ -631,27 +529,15 @@ class CRUD(Generic[ModelTypeVar]):
         return False
 
     def need_commit(self) -> None:
-        """标记该事务的更改需要提交。
-
-        - 当手动修改实例属性后调用此方法以标记需要提交。
-        """
-        # 写操作：懒开启子事务
         self._ensure_sub_txn()
         self._need_commit = True
         self._mark_dirty()
 
     def commit(self) -> None:
-        """立即提交更改。
-
-        - 失败会自动回滚并记录日志。
-        - 若存在子事务，优先提交子事务；否则提交会话。
-        - 显式提交后，__exit__ 不再重复提交。
-        """
         try:
             if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                 self._sub_txn.commit()
             else:
-                # 仅当不在请求级根事务内时才直接提交会话
                 ctx = self._get_request_ctx(create=False)
                 if not (has_request_context() and ctx and ctx.get("root_txn")):
                     self.session.commit()
@@ -662,7 +548,6 @@ class CRUD(Generic[ModelTypeVar]):
             self.session.rollback()
 
     def discard(self) -> None:
-        """放弃更改并回滚。"""
         try:
             if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                 self._sub_txn.rollback()
@@ -674,7 +559,6 @@ class CRUD(Generic[ModelTypeVar]):
             self._discarded = True
 
     def _log(self, error: Exception, status=SQLStatus.INTERNAL_ERR):
-        """统一错误日志格式。"""
         model_name = getattr(self._model, "__name__", str(self._model))
         depth = None
         try:
@@ -683,11 +567,10 @@ class CRUD(Generic[ModelTypeVar]):
         except Exception:
             pass
         _error_logger(
-            f"CRUD[{model_name}]: <catch: {error}> <except: ({status.value})> <depth: {depth}>"
+            f"CRUD[{model_name}]: <catch: {error}> <except: ({status})> <depth: {depth}>"
         )
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """退出上下文管理器，自动处理提交/回滚。"""
         if self.error and self._raise_on_error:
             raise self.error
         try:
@@ -704,7 +587,8 @@ class CRUD(Generic[ModelTypeVar]):
                     except Exception:
                         pass
                     _error_logger(
-                        f"CRUD[{model_name}]: <catch: {self.error}> <except: ({exc_type}: {exc_val})> <depth: {depth}>"
+                        f"CRUD[{model_name}]: <catch: {self.error}> "
+                        f"<except: ({exc_type}: {exc_val})> <depth: {depth}>"
                     )
                 try:
                     if self._sub_txn and getattr(self._sub_txn, "is_active", False):
@@ -719,7 +603,6 @@ class CRUD(Generic[ModelTypeVar]):
                     if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                         self._sub_txn.commit()
                     else:
-                        # 非请求级根事务环境才直接提交
                         ctx_tmp = self._get_request_ctx(create=False)
                         if ctx_tmp is None or not ctx_tmp.get("root_txn"):
                             self.session.commit()
@@ -729,7 +612,6 @@ class CRUD(Generic[ModelTypeVar]):
                     if self._raise_on_error:
                         raise e
 
-            # 若是请求级事务，引用计数到 0 时决定提交/回滚外层事务
             ctx = self._get_request_ctx(create=False)
             if ctx is not None:
                 ctx["depth"] = max(0, ctx.get("depth", 0) - 1)
@@ -779,7 +661,6 @@ class CRUD(Generic[ModelTypeVar]):
             try:
                 ctx["root_txn"] = self.session.begin()
             except Exception:
-                # 回退到隐式事务
                 ctx["root_txn"] = None
         ctx["depth"] = ctx.get("depth", 0) + 1
 
@@ -798,7 +679,6 @@ class CRUD(Generic[ModelTypeVar]):
     def _on_sql_error(self, e: Exception) -> None:
         self.error = e
         self.status = SQLStatus.SQL_ERR
-        # 标记请求级错误并尽快回滚子事务/会话
         ctx = self._get_request_ctx(create=False)
         if ctx is not None:
             ctx["error"] = True
@@ -838,11 +718,7 @@ class CRUD(Generic[ModelTypeVar]):
 
     @classmethod
     def transaction(cls):
-        """函数级事务装饰器。
-
-        - 请求上下文：复用请求根事务，退出时统一提交/回滚。
-        - 非请求上下文：独立开启事务，函数结束后提交或回滚并清理会话。
-        """
+        """函数级事务装饰器。"""
 
         def decorator(func):
             @wraps(func)
@@ -854,3 +730,4 @@ class CRUD(Generic[ModelTypeVar]):
             return wrapper
 
         return decorator
+
