@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 from functools import wraps
-from typing import Any, Generic, Iterator, Optional, TYPE_CHECKING, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Iterator,
+    Optional,
+    TypeVar,
+    cast,
+    overload,
+)
 
 from flask_sqlalchemy.query import Query
-from sqlalchemy.engine import ScalarResult
 
-from .types import EntityTypeVar, ModelTypeVar, ResultTypeVar
+from .types import ModelTypeVar, ResultTypeVar
 
 if TYPE_CHECKING:  # 仅用于类型检查，避免运行时循环依赖
     from .crud import CRUD
+
+
+_E = TypeVar("_E")
 
 
 class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar]):
@@ -55,21 +66,19 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar]):
         return self._wrap(self._query.options(*options))
 
     @overload
-    def with_entities(
-        self, entity: EntityTypeVar, /
-    ) -> "CRUDQuery[ModelTypeVar, EntityTypeVar]": ...
+    def with_entities(self, entity: _E, /) -> "CRUDQuery[ModelTypeVar, _E]": ...
 
     @overload
-    def with_entities(
-        self, __entity: Any, __other: Any, *entities: Any
-    ) -> "CRUDQuery[ModelTypeVar, tuple[Any, ...]]": ...
+    def with_entities(self, *entities: Any) -> "CRUDQuery[ModelTypeVar, tuple[Any, ...]]": ...
 
-    def with_entities(self, *entities: Any):
+    def with_entities(self, *entities: Any) -> "CRUDQuery[ModelTypeVar, Any]":
+        """切换查询实体。
+
+        - 单个实体：`CRUDQuery[Model, E]`
+        - 多个实体：`CRUDQuery[Model, tuple[Any, ...]]`
+        """
         new_query = self._query.with_entities(*entities)
-        wrapper: "CRUDQuery[ModelTypeVar, Any]" = CRUDQuery(self._crud, new_query)
-        if len(entities) == 1:
-            return cast("CRUDQuery[ModelTypeVar, EntityTypeVar]", wrapper)
-        return cast("CRUDQuery[ModelTypeVar, tuple[Any, ...]]", wrapper)
+        return CRUDQuery(self._crud, new_query)
 
     def order_by(self, *clauses) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
         return self._wrap(self._query.order_by(*clauses))
@@ -114,12 +123,6 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar]):
     def scalar(self) -> Optional[ResultTypeVar]:
         result = self._query.scalar()
         return cast(Optional[ResultTypeVar], result)
-
-    def scalar_one(self) -> ResultTypeVar:
-        return cast(ResultTypeVar, self._query.scalar_one())
-
-    def scalars(self) -> ScalarResult[ResultTypeVar]:
-        return cast(ScalarResult[ResultTypeVar], self._query.scalars())
 
     def count(self) -> int:
         return self._query.count()

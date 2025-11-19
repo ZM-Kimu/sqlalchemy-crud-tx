@@ -1,9 +1,4 @@
-from .core import (  # noqa: F401
-    CRUD,
-    CRUDQuery,
-    SQLStatus,
-    ErrorLogger,
-)
+from .core import CRUD, CRUDQuery, ErrorLogger, SQLStatus
 
 __all__ = [
     "CRUD",

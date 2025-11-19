@@ -1,4 +1,6 @@
 from functools import wraps
+
+# mypy: ignore-errors
 from typing import Generic, Optional, Type, TypeVar, overload
 
 from flask import g, has_request_context

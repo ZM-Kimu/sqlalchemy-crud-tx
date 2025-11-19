@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 from functools import wraps
-from typing import Any, Generic, Optional, Type, cast, overload
+from typing import Any, Generic, Literal, Optional, Self, cast, overload
 
 from flask import g, has_request_context
 from flask_sqlalchemy.model import Model
+from flask_sqlalchemy.query import Query
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import object_session
@@ -19,7 +20,7 @@ from .types import ErrorLogger, ModelTypeVar, SessionLike
 _error_logger: ErrorLogger = logging.getLogger("CRUD").error
 
 
-def _get_session_for_cls(crud_cls: type["CRUD[Any]"]) -> SessionLike:
+def _get_session_for_cls(crud_cls: type["CRUD"]) -> SessionLike:
     """根据 CRUD 类获取当前配置的会话对象。
 
     依赖外部通过 CRUD.configure 预先设置 session。
@@ -38,7 +39,7 @@ class _TransactionScope:
 
     __slots__ = ("_crud_cls", "_is_request", "_sub_txn")
 
-    def __init__(self, crud_cls: type["CRUD[Any]"], is_request: bool) -> None:
+    def __init__(self, crud_cls: type["CRUD"], is_request: bool) -> None:
         self._crud_cls = crud_cls
         self._is_request = is_request
         self._sub_txn = None
@@ -54,7 +55,7 @@ class _TransactionScope:
             self._sub_txn = None
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+    def __exit__(self, exc_type, exc_val, exc_tb) -> Literal[False]:
         if self._is_request:
             try:
                 session: SessionLike | None = _get_session_for_cls(self._crud_cls)
@@ -176,7 +177,7 @@ class CRUD(Generic[ModelTypeVar]):
         self._explicit_committed = False
         self._discarded = False
 
-    def __enter__(self) -> "CRUD[ModelTypeVar]":
+    def __enter__(self) -> Self:
         self._ensure_root_txn()
         self._explicit_committed = False
         self._discarded = False
@@ -200,7 +201,7 @@ class CRUD(Generic[ModelTypeVar]):
         self,
         raise_on_error: bool | None = None,
         disable_global_filter: bool | None = None,
-    ) -> "CRUD[ModelTypeVar]":
+    ) -> Self:
         if raise_on_error is not None:
             self._raise_on_error = raise_on_error
         if disable_global_filter is not None:
@@ -278,7 +279,7 @@ class CRUD(Generic[ModelTypeVar]):
     def query(
         self, *args, pure: bool = False, **kwargs
     ) -> CRUDQuery[ModelTypeVar, ModelTypeVar]:
-        query = self._model.query
+        query = cast(Query, self._model.query)
         if not pure:
             if self._instance_default_kwargs:
                 query = query.filter_by(**self._instance_default_kwargs)
@@ -397,7 +398,8 @@ class CRUD(Generic[ModelTypeVar]):
             self._need_commit = False
         except Exception as e:
             _error_logger(f"CRUD commit failed: {e}")
-            self.session.rollback()
+            if self.session is not None:
+                self.session.rollback()
 
     def discard(self) -> None:
         try:
@@ -430,7 +432,6 @@ class CRUD(Generic[ModelTypeVar]):
             has_exc = bool(exc_type or exc_val or exc_tb)
             should_rollback = has_exc or self.error is not None or self._discarded
 
-            assert self.session is not None
             if should_rollback:
                 if has_exc or self.error:
                     model_name = getattr(self._model, "__name__", str(self._model))
@@ -448,7 +449,8 @@ class CRUD(Generic[ModelTypeVar]):
                     if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                         self._sub_txn.rollback()
                     else:
-                        self.session.rollback()
+                        if self.session is not None:
+                            self.session.rollback()
                 except Exception:
                     pass
                 self._need_commit = False
@@ -459,10 +461,12 @@ class CRUD(Generic[ModelTypeVar]):
                     else:
                         ctx_tmp = self._get_request_ctx(create=False)
                         if ctx_tmp is None or not ctx_tmp.get("root_txn"):
-                            self.session.commit()
+                            if self.session is not None:
+                                self.session.commit()
                 except Exception as e:
                     _error_logger(f"CRUD commit failed: {e}")
-                    self.session.rollback()
+                    if self.session is not None:
+                        self.session.rollback()
                     if self._raise_on_error:
                         raise e
 
@@ -471,13 +475,14 @@ class CRUD(Generic[ModelTypeVar]):
                 ctx["depth"] = max(0, ctx.get("depth", 0) - 1)
                 if ctx["depth"] == 0:
                     try:
-                        if ctx.get("error"):
+                        if ctx.get("error") and self.session is not None:
                             self.session.rollback()
-                        else:
+                        elif self.session is not None:
                             self.session.commit()
                     except Exception as e:
                         _error_logger(f"CRUD root commit failed: {e}")
-                        self.session.rollback()
+                        if self.session is not None:
+                            self.session.rollback()
                         if self._raise_on_error:
                             raise e
                     finally:
@@ -487,14 +492,15 @@ class CRUD(Generic[ModelTypeVar]):
                             pass
         finally:
             if not has_request_context():
-                try:
-                    self.session.close()
-                except Exception:
-                    pass
-                try:
-                    self.session.remove()
-                except Exception:
-                    pass
+                if self.session is not None:
+                    try:
+                        self.session.close()
+                    except Exception:
+                        pass
+                    try:
+                        self.session.remove()
+                    except Exception:
+                        pass
 
     def _get_request_ctx(self, create: bool = True):
         if not has_request_context():

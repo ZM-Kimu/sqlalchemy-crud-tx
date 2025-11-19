@@ -15,7 +15,7 @@ from flask_sqlalchemy.model import Model
 
 ModelTypeVar = TypeVar("ModelTypeVar", bound=Model)
 ResultTypeVar = TypeVar("ResultTypeVar", covariant=True)
-EntityTypeVar = TypeVar("EntityTypeVar", covariant=True)
+EntityTypeVar = TypeVar("EntityTypeVar")
 
 ErrorLogger = Callable[[str], None]
 
