@@ -69,7 +69,9 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar]):
     def with_entities(self, entity: _E, /) -> "CRUDQuery[ModelTypeVar, _E]": ...
 
     @overload
-    def with_entities(self, *entities: Any) -> "CRUDQuery[ModelTypeVar, tuple[Any, ...]]": ...
+    def with_entities(
+        self, *entities: Any
+    ) -> "CRUDQuery[ModelTypeVar, tuple[Any, ...]]": ...
 
     def with_entities(self, *entities: Any) -> "CRUDQuery[ModelTypeVar, Any]":
         """切换查询实体。

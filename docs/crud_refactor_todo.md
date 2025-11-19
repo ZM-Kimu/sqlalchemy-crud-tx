@@ -145,26 +145,26 @@
 
 ## 7. 实施阶段分解（施工 TODO，按顺序执行）
 
-- [ ] 第一阶段：引入事务基础设施（P0）
-  - [ ] 新增 `transaction.py` 模块，引入 `ErrorPolicy` / `P` / `R` / `TransactionDecorator` 等公共类型定义。
-  - [ ] 在该模块内搭建最小可用的事务上下文框架（事务栈结构、`SessionLike` 获取约定），暂不对现有 `CRUD` 做调用。
+- [x] 第一阶段：引入事务基础设施（P0）
+  - [x] 新增 `transaction.py` 模块，引入 `ErrorPolicy` / `P` / `R` / `TransactionDecorator` 等公共类型定义。
+  - [x] 在该模块内搭建最小可用的事务上下文框架（事务栈结构、`SessionLike` 获取约定），暂不对现有 `CRUD` 做调用。
 
-- [ ] 第二阶段：实现通用事务状态机与装饰器（P0）
-  - [ ] 在 `transaction.py` 中实现通用 `transaction(session_factory, *, join, nested, error_policy)` 装饰器，完成 join 语义与最外层 `commit/rollback` 行为。
-  - [ ] 为通用装饰器补充最小级别的文档与示例（独立于 `CRUD`，仅依赖 `SessionLike`）。
+- [x] 第二阶段：实现通用事务状态机与装饰器（P0）
+  - [x] 在 `transaction.py` 中实现通用 `transaction(session_factory, *, join, nested, error_policy)` 装饰器，完成 join 语义与最外层 `commit/rollback` 行为。
+  - [x] 为通用装饰器补充最小级别的文档与示例（独立于 `CRUD`，仅依赖 `SessionLike`）。
 
-- [ ] 第三阶段：重写 `CRUD.transaction` 与上下文事务（P0）
-  - [ ] 在 `crud.py` 中重写 `CRUD.transaction`，使其仅作为通用 `transaction(...)` 的薄包装（解析配置 + 构造 `session_factory`）。
-  - [ ] 重构 `CRUD.__enter__` / `CRUD.__exit__`，使其基于同一事务状态机表达上下文级事务，并与 `@CRUD.transaction` 共用 join 行为。
+- [x] 第三阶段：重写 `CRUD.transaction` 与上下文事务（P0）
+  - [x] 在 `crud.py` 中重写 `CRUD.transaction`，使其仅作为通用 `transaction(...)` 的薄包装（解析配置 + 构造 `session_factory`）。
+  - [x] 重构 `CRUD.__enter__` / `CRUD.__exit__`，使其基于同一事务状态机表达上下文级事务，并与 `@CRUD.transaction` 共用 join 行为。
 
-- [ ] 第四阶段：移除旧的请求级事务与 Flask 耦合代码（P1）
-  - [ ] 删除或迁移 `_get_request_ctx` / `_get_request_ctx_cls` / `_ensure_root_txn*` / `_CTX_KEY` 等请求级事务相关实现。
-  - [ ] 移除 `_TransactionScope` 中对 `flask.g` / `has_request_context` 的直接依赖，只保留与通用事务状态机一致的部分。
-  - [ ] 若需要，为 Flask 提供可选的集成模块（如 `flask_integration.py`），但不在核心中默认启用。
+- [x] 第四阶段：移除旧的请求级事务与 Flask 耦合代码（P1）
+  - [x] 删除 `_get_request_ctx` / `_get_request_ctx_cls` / `_ensure_root_txn*` / `_CTX_KEY` 等请求级事务相关实现，并移除相应调用。
+  - [x] 移除 `_TransactionScope` 中对 `flask.g` / `has_request_context` 的直接依赖，不再在核心中参与事务控制逻辑。
+  - [x] 简化日志与错误处理逻辑，使其不再依赖请求级 depth 等上下文字段；如需请求级事务，将在未来的可选集成模块中单独实现。
 
-- [ ] 第五阶段：统一错误处理与日志策略（P1）
-  - [ ] 在新的事务实现中统一 `error_policy` 的解析路径（装饰器参数 > 实例配置 > 全局配置 > 默认值）。
-  - [ ] 对 `CRUD.error` / `CRUD.status` / `_log` / `_error_logger` 的使用做一次整理，保证在 `"raise"` 与 `"status"` 模式下行为一致且文档化。
+- [x] 第五阶段：统一错误处理与日志策略（P1）
+  - [x] 在新的事务实现中统一 `error_policy` 的解析路径：事务装饰器参数（通用 `transaction(...)` / `CRUD.transaction(...)`）优先，其次为 CRUD 实例级 `config(error_policy=...)`，最后为类级默认配置 `_default_error_policy`。
+  - [x] 对 `CRUD.error` / `CRUD.status` / `_log` / `_error_logger` 的使用做了一次整理：SQLAlchemyError 通过 `_on_sql_error` 设置状态并在 `"raise"` 策略下抛出，其它异常始终向外抛出；日志不再依赖 request 级 depth 字段，行为在 `"raise"` 与 `"status"` 下保持一致且集中在事务边界处理。
 
 - [ ] 第六阶段：文档与示例完善（P2）
   - [ ] 在 `docs/` 中新增简短的“事务行为示例”，涵盖典型嵌套场景（`a()` 调 `b()` / `c()` 等 join 行为）。

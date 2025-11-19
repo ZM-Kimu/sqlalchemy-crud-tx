@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import logging
 from functools import wraps
-from typing import Any, Generic, Literal, Optional, Self, cast, overload
-
-from flask import g, has_request_context
+from typing import (
+    Any,
+    Generic,
+    Literal,
+    Optional,
+    Self,
+    cast,
+    overload,
+    ParamSpec,
+    TypeVar,
+)
 from flask_sqlalchemy.model import Model
 from flask_sqlalchemy.query import Query
 from sqlalchemy import inspect as sa_inspect
@@ -15,7 +23,17 @@ from sqlalchemy.sql import _orm_types
 from .query import CRUDQuery
 from .status import SQLStatus
 from .types import ErrorLogger, ModelTypeVar, SessionLike
+from .transaction import (
+    ErrorPolicy,
+    TransactionDecorator,
+    _get_or_create_txn_state,
+    _get_txn_state,
+    get_current_error_policy,
+    transaction as _txn_transaction,
+)
 
+P = ParamSpec("P")
+R = TypeVar("R")
 
 _error_logger: ErrorLogger = logging.getLogger("CRUD").error
 
@@ -34,123 +52,17 @@ def _get_session_for_cls(crud_cls: type["CRUD"]) -> SessionLike:
     return cast(SessionLike, session)
 
 
-class _TransactionScope:
-    """简化 transaction 装饰器内部的事务管理。"""
-
-    __slots__ = ("_crud_cls", "_is_request", "_sub_txn")
-
-    def __init__(self, crud_cls: type["CRUD"], is_request: bool) -> None:
-        self._crud_cls = crud_cls
-        self._is_request = is_request
-        self._sub_txn = None
-
-    def __enter__(self):
-        if self._is_request:
-            self._crud_cls._ensure_root_txn_cls()
-            return self
-        try:
-            session = _get_session_for_cls(self._crud_cls)
-            self._sub_txn = session.begin_nested()
-        except Exception:
-            self._sub_txn = None
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> Literal[False]:
-        if self._is_request:
-            try:
-                session: SessionLike | None = _get_session_for_cls(self._crud_cls)
-            except Exception:
-                session = None
-            ctx = self._crud_cls._get_request_ctx_cls(create=False)
-            if exc_type is not None and ctx is not None:
-                ctx["error"] = True
-            if exc_type is not None and session is not None:
-                try:
-                    session.rollback()
-                except Exception:
-                    pass
-            if ctx is not None:
-                ctx["depth"] = max(0, ctx.get("depth", 0) - 1)
-                if ctx["depth"] == 0:
-                    try:
-                        if session is not None:
-                            if ctx.get("error"):
-                                session.rollback()
-                            else:
-                                session.commit()
-                    except Exception as exc:
-                        _error_logger(f"CRUD root commit failed: {exc}")
-                        if session is not None:
-                            try:
-                                session.rollback()
-                            except Exception:
-                                pass
-                        ctx["error"] = True
-                    finally:
-                        try:
-                            delattr(g, self._crud_cls._CTX_KEY)
-                        except Exception:
-                            pass
-            return False
-
-        success = exc_type is None
-        try:
-            session = _get_session_for_cls(self._crud_cls)
-        except Exception:
-            session = None
-        try:
-            if success:
-                if self._sub_txn is not None and getattr(
-                    self._sub_txn, "is_active", False
-                ):
-                    try:
-                        self._sub_txn.commit()
-                    except Exception:
-                        pass
-                if session is not None:
-                    session.commit()
-            else:
-                if self._sub_txn is not None and getattr(
-                    self._sub_txn, "is_active", False
-                ):
-                    try:
-                        self._sub_txn.rollback()
-                    except Exception:
-                        pass
-                if session is not None:
-                    session.rollback()
-        except Exception:
-            if session is not None:
-                try:
-                    session.rollback()
-                except Exception:
-                    pass
-            if success:
-                raise
-        finally:
-            if session is not None:
-                for name in ("close", "remove"):
-                    func = getattr(session, name, None)
-                    if callable(func):
-                        try:
-                            func()
-                        except Exception:
-                            pass
-        return False
-
-
 class CRUD(Generic[ModelTypeVar]):
     """通用 CRUD 封装。
 
     - 基于上下文管理器的事务提交/回滚。
-    - 请求级根事务共享（同一请求内的多个 CRUD 实例共享事务）。
     - 统一错误状态管理（SQLStatus）。
     - 全局与实例级默认过滤条件。
     """
 
     _global_filter_conditions: tuple[list, dict] = ([], {})
-    _CTX_KEY = "_crud_v3_ctx"
     session: SessionLike | None = None
+    _default_error_policy: ErrorPolicy = "raise"
 
     @classmethod
     def register_global_filters(cls, *base_exprs, **base_kwargs) -> None:
@@ -158,7 +70,6 @@ class CRUD(Generic[ModelTypeVar]):
         cls._global_filter_conditions = (list(base_exprs) or []), (base_kwargs or {})
 
     def __init__(self, model: type[Model], **kwargs) -> None:
-        self._txn = None
         self._model = model
         self._kwargs = kwargs
 
@@ -171,14 +82,51 @@ class CRUD(Generic[ModelTypeVar]):
         self.status: SQLStatus = SQLStatus.OK
 
         self._need_commit = False
-        self._raise_on_error = False
+        self._error_policy: ErrorPolicy | None = None
         self._apply_global_filters = True
+        self._txn_state = None
+        self._joined_txn = False
         self._sub_txn = None
         self._explicit_committed = False
         self._discarded = False
 
+    def _resolve_error_policy(self) -> ErrorPolicy:
+        """解析当前 CRUD 实例应采用的 error_policy。
+
+        优先级：
+        1. 当前事务装饰器上下文中设置的 error_policy（若有）；
+        2. 实例级配置（config）；
+        3. 类级默认配置（set_config / _default_error_policy）。
+        """
+        from_ctx = get_current_error_policy()
+        if from_ctx is not None:
+            return from_ctx
+        if self._error_policy is not None:
+            return self._error_policy
+        return self._default_error_policy
+
     def __enter__(self) -> Self:
-        self._ensure_root_txn()
+        assert self.session is not None
+        session = self.session
+
+        state = _get_txn_state(session)
+        joined_existing = bool(state is not None and state.active)
+
+        if not joined_existing:
+            state = _get_or_create_txn_state(session)
+            state.depth = 0
+            state.active = True
+            try:
+                session.begin()
+            except Exception:
+                state.active = False
+                raise
+
+        assert state is not None
+        state.depth += 1
+
+        self._txn_state = state
+        self._joined_txn = joined_existing
         self._explicit_committed = False
         self._discarded = False
         return self
@@ -199,14 +147,20 @@ class CRUD(Generic[ModelTypeVar]):
 
     def config(
         self,
-        raise_on_error: bool | None = None,
+        error_policy: ErrorPolicy | None = None,
         disable_global_filter: bool | None = None,
     ) -> Self:
-        if raise_on_error is not None:
-            self._raise_on_error = raise_on_error
+        if error_policy is not None:
+            self._error_policy = error_policy
         if disable_global_filter is not None:
             self._apply_global_filters = not disable_global_filter
         return self
+
+    @classmethod
+    def set_config(cls, *, error_policy: ErrorPolicy | None = None) -> None:
+        """配置 CRUD 类级默认行为（如 error_policy）。"""
+        if error_policy is not None:
+            cls._default_error_policy = error_policy
 
     def create_instance(self, no_attach: bool = False) -> ModelTypeVar:
         if no_attach:
@@ -391,9 +345,7 @@ class CRUD(Generic[ModelTypeVar]):
             if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                 self._sub_txn.commit()
             else:
-                ctx = self._get_request_ctx(create=False)
-                if not (has_request_context() and ctx and ctx.get("root_txn")):
-                    self.session.commit()
+                self.session.commit()
             self._explicit_committed = True
             self._need_commit = False
         except Exception as e:
@@ -415,18 +367,13 @@ class CRUD(Generic[ModelTypeVar]):
 
     def _log(self, error: Exception, status: SQLStatus = SQLStatus.INTERNAL_ERR):
         model_name = getattr(self._model, "__name__", str(self._model))
-        depth = None
-        try:
-            ctx = self._get_request_ctx(create=False)
-            depth = ctx.get("depth") if ctx else None
-        except Exception:
-            pass
-        _error_logger(
-            f"CRUD[{model_name}]: <catch: {error}> <except: ({status})> <depth: {depth}>"
-        )
+        _error_logger(f"CRUD[{model_name}]: <catch: {error}> <except: ({status})>")
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        if self.error and self._raise_on_error:
+        # 对于非 SQLAlchemy 异常，始终向外抛出；
+        # SQLAlchemyError 的抛出与否由 error_policy 决定，
+        # 在事务装饰器或 _on_sql_error 中处理。
+        if self.error and not isinstance(self.error, SQLAlchemyError):
             raise self.error
         try:
             has_exc = bool(exc_type or exc_val or exc_tb)
@@ -435,22 +382,13 @@ class CRUD(Generic[ModelTypeVar]):
             if should_rollback:
                 if has_exc or self.error:
                     model_name = getattr(self._model, "__name__", str(self._model))
-                    depth = None
-                    try:
-                        ctx_tmp = self._get_request_ctx(create=False)
-                        depth = ctx_tmp.get("depth") if ctx_tmp else None
-                    except Exception:
-                        pass
                     _error_logger(
                         f"CRUD[{model_name}]: <catch: {self.error}> "
-                        f"<except: ({exc_type}: {exc_val})> <depth: {depth}>"
+                        f"<except: ({exc_type}: {exc_val})>"
                     )
                 try:
                     if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                         self._sub_txn.rollback()
-                    else:
-                        if self.session is not None:
-                            self.session.rollback()
                 except Exception:
                     pass
                 self._need_commit = False
@@ -458,72 +396,40 @@ class CRUD(Generic[ModelTypeVar]):
                 try:
                     if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                         self._sub_txn.commit()
-                    else:
-                        ctx_tmp = self._get_request_ctx(create=False)
-                        if ctx_tmp is None or not ctx_tmp.get("root_txn"):
-                            if self.session is not None:
-                                self.session.commit()
                 except Exception as e:
                     _error_logger(f"CRUD commit failed: {e}")
-                    if self.session is not None:
-                        self.session.rollback()
-                    if self._raise_on_error:
-                        raise e
+                    raise
 
-            ctx = self._get_request_ctx(create=False)
-            if ctx is not None:
-                ctx["depth"] = max(0, ctx.get("depth", 0) - 1)
-                if ctx["depth"] == 0:
-                    try:
-                        if ctx.get("error") and self.session is not None:
-                            self.session.rollback()
-                        elif self.session is not None:
-                            self.session.commit()
-                    except Exception as e:
-                        _error_logger(f"CRUD root commit failed: {e}")
-                        if self.session is not None:
-                            self.session.rollback()
-                        if self._raise_on_error:
-                            raise e
-                    finally:
+            # 基于通用事务状态机调整深度，并在最外层执行提交/回滚
+            if self.session is not None:
+                session = self.session
+                state = _get_txn_state(session)
+                joined_existing = getattr(self, "_joined_txn", False)
+
+                if state is not None and state.active:
+                    state.depth -= 1
+                    is_outermost = state.depth <= 0
+                    if is_outermost:
+                        state.active = False
                         try:
-                            delattr(g, self._CTX_KEY)
-                        except Exception:
-                            pass
+                            if should_rollback and not joined_existing:
+                                session.rollback()
+                            elif (
+                                self._need_commit
+                                and not self._explicit_committed
+                                and not joined_existing
+                            ):
+                                session.commit()
+                        except Exception as e:
+                            _error_logger(f"CRUD commit/rollback failed: {e}")
+                            try:
+                                session.rollback()
+                            except Exception:
+                                pass
+                            raise e
         finally:
-            if not has_request_context():
-                if self.session is not None:
-                    try:
-                        self.session.close()
-                    except Exception:
-                        pass
-                    try:
-                        self.session.remove()
-                    except Exception:
-                        pass
-
-    def _get_request_ctx(self, create: bool = True):
-        if not has_request_context():
-            return None
-        ctx = getattr(g, self._CTX_KEY, None)
-        if ctx is None and create:
-            ctx = {"root_txn": None, "depth": 0, "error": False, "dirty": False}
-            setattr(g, self._CTX_KEY, ctx)
-        return ctx
-
-    def _ensure_root_txn(self) -> None:
-        ctx = self._get_request_ctx(create=True)
-        if ctx is None:
+            # Session 的生命周期由外部（如应用框架）负责管理。
             return
-        if ctx.get("root_txn") is None or not getattr(
-            ctx.get("root_txn"), "is_active", True
-        ):
-            try:
-                assert self.session is not None
-                ctx["root_txn"] = self.session.begin()
-            except Exception:
-                ctx["root_txn"] = None
-        ctx["depth"] = ctx.get("depth", 0) + 1
 
     def _ensure_sub_txn(self) -> None:
         if not (self._sub_txn and self._sub_txn.is_active):
@@ -534,16 +440,12 @@ class CRUD(Generic[ModelTypeVar]):
                 self._sub_txn = None
 
     def _mark_dirty(self) -> None:
-        ctx = self._get_request_ctx(create=False)
-        if ctx is not None:
-            ctx["dirty"] = True
+        # 当前上下文事务由通用状态机管理，保留占位以便未来扩展。
+        return
 
     def _on_sql_error(self, e: Exception) -> None:
         self.error = e
         self.status = SQLStatus.SQL_ERR
-        ctx = self._get_request_ctx(create=False)
-        if ctx is not None:
-            ctx["error"] = True
         try:
             assert self.session is not None
             if self._sub_txn and getattr(self._sub_txn, "is_active", False):
@@ -553,43 +455,35 @@ class CRUD(Generic[ModelTypeVar]):
         except Exception:
             pass
         self._need_commit = False
+        # 仅当 error_policy 为 "raise" 时，对 SQLAlchemy 异常向外抛出，
+        # 由事务装饰器或调用方统一处理。
+        if self._resolve_error_policy() == "raise":
+            raise e
 
     @classmethod
-    def _get_request_ctx_cls(cls, create: bool = True):
-        if not has_request_context():
-            return None
-        ctx = getattr(g, cls._CTX_KEY, None)
-        if ctx is None and create:
-            ctx = {"root_txn": None, "depth": 0, "error": False, "dirty": False}
-            setattr(g, cls._CTX_KEY, ctx)
-        return ctx
+    def transaction(
+        cls,
+        *,
+        error_policy: ErrorPolicy | None = None,
+        join: bool = True,
+        nested: bool | None = None,
+    ) -> TransactionDecorator[P, R]:
+        """函数级事务装饰器。
 
-    @classmethod
-    def _ensure_root_txn_cls(cls) -> None:
-        ctx = cls._get_request_ctx_cls(create=True)
-        if ctx is None:
-            return
-        if ctx.get("root_txn") is None or not getattr(
-            ctx.get("root_txn"), "is_active", True
-        ):
-            try:
-                session = _get_session_for_cls(cls)
-                ctx["root_txn"] = session.begin()
-            except Exception:
-                ctx["root_txn"] = None
-        ctx["depth"] = ctx.get("depth", 0) + 1
+        - 一次函数调用 = 一个 CRUD 相关的事务域。
+        - 基于通用 transaction(...) 实现 join 语义与提交/回滚。
+        """
 
-    @classmethod
-    def transaction(cls):
-        """函数级事务装饰器。"""
+        resolved_policy: ErrorPolicy = (
+            error_policy if error_policy is not None else cls._default_error_policy
+        )
 
-        def decorator(func):
-            @wraps(func)
-            def wrapper(*args, **kwargs):
-                scope = _TransactionScope(cls, has_request_context())
-                with scope:
-                    return func(*args, **kwargs)
+        def session_factory() -> SessionLike:
+            return _get_session_for_cls(cls)
 
-            return wrapper
-
-        return decorator
+        return _txn_transaction(
+            session_factory,
+            join=join,
+            nested=nested,
+            error_policy=resolved_policy,
+        )
