@@ -41,7 +41,7 @@ jobs:
                   PYPROJ_VER=$(python - <<'PY'
                   import tomllib
                   with open("pyproject.toml","rb") as f:
-                      data=tomli.load(f)
+                      data=tomllib.load(f)
                   print(data.get("project",{}).get("version",""))
                   PY
                   )
