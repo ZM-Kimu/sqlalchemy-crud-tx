@@ -3,15 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import (
-    Generic,
-    Optional,
-    Self,
-    cast,
-    overload,
-    ParamSpec,
-    TypeVar,
-)
+from typing import Any, Generic, Optional, ParamSpec, Self, TypeVar, cast
+
 from flask_sqlalchemy.model import Model
 from flask_sqlalchemy.query import Query
 from sqlalchemy import inspect as sa_inspect
@@ -21,16 +14,16 @@ from sqlalchemy.sql import _orm_types
 
 from .query import CRUDQuery
 from .status import SQLStatus
-from .types import ErrorLogger, ModelTypeVar, SessionLike
 from .transaction import (
     ErrorPolicy,
     TransactionDecorator,
-    _TxnState,
     _get_or_create_txn_state,
     _get_txn_state,
+    _TxnState,
     get_current_error_policy,
-    transaction as _txn_transaction,
 )
+from .transaction import transaction as _txn_transaction
+from .types import ErrorLogger, ModelTypeVar, SessionLike
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -70,12 +63,12 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         """为所有模型注册全局基础过滤。"""
         cls._global_filter_conditions = (list(base_exprs) or []), (base_kwargs or {})
 
-    def __init__(self, model: type[Model], **kwargs) -> None:
+    def __init__(self, model: type[ModelTypeVar], **kwargs: Any) -> None:
         """初始化 CRUD 实例。"""
         self._model = model
         self._kwargs = kwargs
 
-        self.instance: Model | None = None
+        self.instance: ModelTypeVar | None = None
         self._base_filter_exprs: list = list(self._global_filter_conditions[0])
         self._base_filter_kwargs: dict = dict(self._global_filter_conditions[1])
         self._instance_default_kwargs: dict = dict(kwargs)
@@ -98,7 +91,7 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         优先级：
         1. 当前事务装饰器上下文中设置的 error_policy（若有）；
         2. 实例级配置（config）；
-        3. 类级默认配置（set_config / _default_error_policy）。
+        3. 类级默认配置（_default_error_policy）。
         """
         from_ctx = get_current_error_policy()
         if from_ctx is not None:
@@ -140,12 +133,15 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         *,
         session: SessionLike | None = None,
         error_logger: ErrorLogger | None = None,
+        error_policy: ErrorPolicy | None = None,
     ) -> None:
-        """配置 CRUD 所依赖的会话与日志函数（类级别）。"""
+        """配置 CRUD 所依赖的会话与日志和默认策略（类级别）。"""
         if session is not None:
             cls.session = session
         if error_logger is not None:
             cls._logger = error_logger
+        if error_policy is not None:
+            cls._default_error_policy = error_policy
 
     def config(
         self,
@@ -159,12 +155,6 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
             self._apply_global_filters = not disable_global_filter
         return self
 
-    @classmethod
-    def set_config(cls, *, error_policy: ErrorPolicy | None = None) -> None:
-        """配置 CRUD 类级默认行为（如 error_policy）。"""
-        if error_policy is not None:
-            cls._default_error_policy = error_policy
-
     def create_instance(self, no_attach: bool = False) -> ModelTypeVar:
         """创建或返回当前绑定的模型实例。"""
         if no_attach:
@@ -173,25 +163,69 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
             self.instance = self._model(**self._kwargs)
         return cast(ModelTypeVar, self.instance)
 
-    @overload
-    def add(self, instances: None = None, **kwargs) -> Optional[ModelTypeVar]: ...
-
-    @overload
     def add(
-        self, instances: list[ModelTypeVar], **kwargs
-    ) -> Optional[list[ModelTypeVar]]: ...
+        self,
+        instance: ModelTypeVar | None = None,
+        **kwargs: Any,
+    ) -> ModelTypeVar | None:
+        """新增一条记录，并可选择在创建时更新字段。
 
-    @overload
-    def add(self, instances: ModelTypeVar, **kwargs) -> Optional[ModelTypeVar]: ...
-
-    def add(
-        self, instances: ModelTypeVar | list[ModelTypeVar] | None = None, **kwargs
-    ) -> list[ModelTypeVar] | ModelTypeVar | None:
-        """新增一条或多条记录，并可选择更新字段。"""
+        行为：
+        - 当 instance 为 None 时，使用构造 CRUD 时传入的默认 kwargs 创建实例；
+        - 否则，将给定 instance 合并到当前会话，并应用额外的字段更新。
+        """
         try:
-            instances = instances or self.create_instance()
-            if not isinstance(instances, list):
-                instances = [instances]
+            if instance is None:
+                instance = self.create_instance()
+
+            self._ensure_sub_txn()
+
+            need_merge = False
+            try:
+                if not (insp := sa_inspect(instance)):
+                    raise ValueError()
+                bound_sess = object_session(instance)
+                need_merge = (not insp.transient) or (
+                    bound_sess is not None and bound_sess is not self.session
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                need_merge = True
+
+            assert self.session is not None
+            target = (
+                cast(ModelTypeVar, self.session.merge(instance))
+                if need_merge
+                else instance
+            )
+
+            if kwargs:
+                updated = self.update(target, **kwargs)
+                if updated is not None:
+                    target = updated
+
+            assert self.session is not None
+            self.session.add(target)
+            # 立即 flush，以便为调用方提供主键等数据库生成字段
+            self.session.flush()
+            self._need_commit = True
+            self._mark_dirty()
+            return target
+        except SQLAlchemyError as exc:
+            self._on_sql_error(exc)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self.error = exc
+            self.status = SQLStatus.INTERNAL_ERR
+        return None
+
+    def add_many(
+        self,
+        instances: list[ModelTypeVar],
+        **kwargs: Any,
+    ) -> list[ModelTypeVar] | None:
+        """批量新增多条记录，并可为每条记录应用相同的字段更新。"""
+        try:
+            if not instances:
+                return []
 
             self._ensure_sub_txn()
 
@@ -214,22 +248,19 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                     if need_merge
                     else instance
                 )
-                if updated := self.update(target, **kwargs):
-                    managed_instances.append(updated)
-                else:
-                    managed_instances.append(target)
+                if kwargs:
+                    updated = self.update(target, **kwargs)
+                    if updated is not None:
+                        managed_instances.append(updated)
+                        continue
+                managed_instances.append(target)
 
             assert self.session is not None
             self.session.add_all(managed_instances)
-            # 立即 flush，以便为调用方提供主键等数据库生成字段
             self.session.flush()
             self._need_commit = True
             self._mark_dirty()
-            return (
-                managed_instances[0]
-                if len(managed_instances) == 1
-                else managed_instances
-            )
+            return managed_instances
         except SQLAlchemyError as exc:
             self._on_sql_error(exc)
         except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -295,7 +326,9 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
 
             self._ensure_sub_txn()
             assert self.session is not None
-            with self.session.no_autoflush:
+            no_autoflush_cm = self.session.no_autoflush
+            assert no_autoflush_cm is not None
+            with no_autoflush_cm:
                 for k, v in kwargs.items():
                     setattr(instance, k, v)
             self._need_commit = True
