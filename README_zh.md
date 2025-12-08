@@ -1,24 +1,24 @@
 # flask-sqlalchemy-crud
 
-English | [中文](README_zh.md)
+一个针对 Flask-SQLAlchemy 的轻量级 CRUD/事务辅助库：
+- `with CRUD(Model) as crud:` 提供上下文式 CRUD 与子事务
+- `@CRUD.transaction()` 支持 join 语义的函数级事务
+- `error_policy="raise"|"status"` 可选错误策略，日志接口可自定义
+- 类型友好的 `CRUDQuery` 链式查询包装
 
-A lightweight CRUD + transaction helper for Flask-SQLAlchemy:
-- Context-managed CRUD with nested savepoints: `with CRUD(Model) as crud:`
-- Function-level transactions via `@CRUD.transaction()` with join semantics
-- Configurable error policy (`error_policy="raise"|"status"`) and pluggable logger
-- Type-friendly `CRUDQuery` wrapper for common chainable operations
+> 仓库仍在重构阶段，API 可能会有改动。
 
-## Install
+## 安装
 
 ```bash
 pip install flask-sqlalchemy-crud
-# or
+# 或
 pip install -e .
 ```
 
-Requires Python 3.10+ with `flask-sqlalchemy>=3.0` and `sqlalchemy>=1.4` (pip will install these automatically).
+需要 Python 3.10+，`pip` 会自动安装 `flask-sqlalchemy>=3.0` 与 `sqlalchemy>=1.4`。
 
-## Quick Start
+## 快速开始
 
 ```python
 from flask import Flask
@@ -29,11 +29,10 @@ from flask_sqlalchemy_crud import CRUD
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///./crud_example.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
 db = SQLAlchemy(app)
 
 
-class User(db.Model):
+class User(db.Model):  # type: ignore[misc]
     __tablename__ = "example_user"
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(db.String(255), unique=True, nullable=False)
@@ -53,7 +52,7 @@ with app.app_context():
         print("fetched", crud.first())
 ```
 
-## Function-Level Transactions
+## 函数级事务示例
 
 ```python
 from flask_sqlalchemy_crud import CRUD
@@ -71,24 +70,24 @@ with app.app_context():
     create_two_users()
 ```
 
-- The outermost call commits or rolls back; inner CRUD contexts only mark status when exceptions occur.
-- With `error_policy="status"`, SQLAlchemyError is rolled back and catched; check `crud.status` / `crud.error` instead.
+- 最外层调用负责提交/回滚；内层 `CRUD` 上下文遇到异常仅标记状态，最终由装饰器处理。
+- `error_policy="status"` 会在回滚后吞掉 SQLAlchemyError，由调用方检查 `crud.status` / `crud.error`。
 
-## Docs & Examples
+## 示例与文档
 
-- Full example: `docs/examples/basic_crud.py`
-- Transaction refactor notes/TODO: `docs/crud_refactor_todo.md`
-- Typing directions: `docs/todo.md`
+- 完整示例：`docs/examples/basic_crud.py`
+- 事务重构设计与 TODO：`docs/crud_refactor_todo.md`
+- 类型增强方向：`docs/todo.md`
 
-## Testing
+## 运行测试
 
-1. Provide a DB URI via env or `.env`: `TEST_DB=sqlite:///./test.db` (or another driver).
-2. Install test deps, then:
+1. 在环境变量或 `.env` 中设置可访问的数据库 URI：`TEST_DB=sqlite:///./test.db`（或其他驱动）。
+2. 安装测试依赖后执行：
    ```bash
    pytest -q
    ```
 
-## Notes
+## 提示
 
-- Tightly coupled to Flask-SQLAlchemy; pure SQLAlchemy usage is not yet supported.
-- Always call `CRUD.configure(session=...)` before using CRUD instances.
+- 仍与 Flask-SQLAlchemy 紧耦合，纯 SQLAlchemy 场景暂未适配。
+- 使用前请先调用 `CRUD.configure(session=...)` 配置会话。
