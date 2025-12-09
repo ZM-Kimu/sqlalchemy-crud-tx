@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
-from flask_sqlalchemy.model import Model
 from sqlalchemy.orm import Session as _Session
 from sqlalchemy.orm import scoped_session as _ScopedSession
 
-ModelTypeVar = TypeVar("ModelTypeVar", bound=Model)
+if TYPE_CHECKING:
+    from .query import CRUDQuery
+
+
+@runtime_checkable
+class ORMModel(Protocol):
+    """最小模型能力约束，便于与纯 SQLAlchemy/Flask-SQLAlchemy 兼容。"""
+
+    __table__: Any
+
+
+ModelTypeVar = TypeVar("ModelTypeVar", bound=ORMModel)
 ResultTypeVar = TypeVar("ResultTypeVar", covariant=True)
 EntityTypeVar = TypeVar("EntityTypeVar")
 
@@ -18,3 +29,8 @@ ErrorLogger = Callable[..., None]
 # 这样 IDE 和类型检查器可以完整复用 SQLAlchemy 自带的类型注解，
 # 同时兼容 Flask-SQLAlchemy 提供的 scoped_session[Session] 类型。
 SessionLike = _Session | _ScopedSession[_Session]
+
+SessionProvider = Callable[[], SessionLike]
+QueryFactory = Callable[
+    [type[ModelTypeVar], SessionLike], "CRUDQuery[ModelTypeVar, Any]"
+]

@@ -12,7 +12,7 @@ from typing import (
     overload,
 )
 
-from flask_sqlalchemy.query import Query
+from sqlalchemy.orm import Query
 
 from .types import ModelTypeVar, ResultTypeVar
 

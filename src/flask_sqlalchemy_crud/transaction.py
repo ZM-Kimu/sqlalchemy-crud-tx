@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextvars import ContextVar
-from typing import Callable, Dict, Literal, ParamSpec, TypeAlias, TypeVar, cast
+from typing import Literal, ParamSpec, TypeAlias, TypeVar, cast
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -35,7 +36,7 @@ class _TxnState:
         self.active: bool = False  # 是否存在活跃事务
 
 
-_TxnMap: TypeAlias = Dict[int, _TxnState]
+_TxnMap: TypeAlias = dict[int, _TxnState]
 
 _current_txn_map: ContextVar[_TxnMap] = ContextVar("_current_txn_map")
 _current_error_policy: ContextVar[ErrorPolicy | None] = ContextVar(
@@ -171,8 +172,8 @@ def transaction(
 
                 try:
                     result = func(*args, **kwargs)
-                    return result  # type: ignore[return-value]
-                except BaseException as exc:  # pylint: disable=broad-exception-caught
+                    return result
+                except BaseException as exc:
                     captured_exc = exc
 
                     # 仅最外层事务负责执行数据库 rollback
@@ -206,7 +207,7 @@ def transaction(
                             if captured_exc is None and not joining_existing:
                                 try:
                                     session.commit()
-                                except Exception as commit_exc:  # pylint: disable=broad-exception-caught
+                                except Exception as commit_exc:
                                     # 提交失败时尝试回滚并抛出提交异常
                                     try:
                                         session.rollback()

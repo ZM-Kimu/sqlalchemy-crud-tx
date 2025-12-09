@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Generic, Optional, ParamSpec, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, ParamSpec, Self, TypeVar, cast
 
-from flask_sqlalchemy.model import Model
-from flask_sqlalchemy.query import Query
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import object_session
+from sqlalchemy.orm import Query, object_session
 from sqlalchemy.sql import _orm_types
 
 from .query import CRUDQuery
@@ -23,7 +21,7 @@ from .transaction import (
     get_current_error_policy,
 )
 from .transaction import transaction as _txn_transaction
-from .types import ErrorLogger, ModelTypeVar, SessionLike
+from .types import ErrorLogger, ModelTypeVar, QueryFactory, SessionLike, SessionProvider
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -31,18 +29,52 @@ R = TypeVar("R")
 _DEFAULT_LOGGER: ErrorLogger = logging.getLogger("CRUD").error
 
 
-def _get_session_for_cls(crud_cls: type["CRUD"]) -> SessionLike:
-    """根据 CRUD 类获取当前配置的会话对象。
+def _default_query_factory(
+    model: type[ModelTypeVar], session: SessionLike, crud: "CRUD[ModelTypeVar]"
+) -> CRUDQuery[ModelTypeVar, ModelTypeVar]:
+    """默认使用 SQLAlchemy Session 构造查询（不依赖 Flask-SQLAlchemy）。"""
+    base_query = session.query(model)
+    return CRUDQuery(crud, cast(Query, base_query))
 
-    依赖外部通过 CRUD.configure 预先设置 session。
+
+class _SessionView:
+    """对外暴露的 Session 视图。
+
+    - 普通方法直接透传到底层 Session；
+    - commit/rollback 调用被重定向到 CRUD.commit / CRUD.discard，
+      避免绕过 CRUD 自己的事务状态机。
     """
-    session = getattr(crud_cls, "session", None)
-    if session is None:
-        raise RuntimeError(
-            "CRUD session is not configured. "
-            "Please call CRUD.configure(session=...) before using CRUD."
+
+    __slots__ = ("_crud", "_session")
+
+    def __init__(self, crud: "CRUD[Any]", session: SessionLike) -> None:
+        self._crud = crud
+        self._session = session
+
+    def commit(self, *args: Any, **kwargs: Any) -> None:  # noqa: D401 - 简短重定向
+        """重定向到 CRUD.commit，并记录日志提示。"""
+        self._crud._logger(  # noqa: SLF001
+            "CRUD.session.commit() is redirected to CRUD.commit(); "
+            "consider calling CRUD.commit() explicitly.",
         )
-    return cast(SessionLike, session)
+        self._crud.commit()
+
+    def rollback(self, *args: Any, **kwargs: Any) -> None:  # noqa: D401 - 简短重定向
+        """重定向到 CRUD.discard，并记录日志提示。"""
+        self._crud._logger(  # noqa: SLF001
+            "CRUD.session.rollback() is redirected to CRUD.discard(); "
+            "consider calling CRUD.discard() explicitly.",
+        )
+        self._crud.discard()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+
+if TYPE_CHECKING:
+    SessionViewType = SessionLike
+else:
+    SessionViewType = _SessionView
 
 
 class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attributes
@@ -54,7 +86,8 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
     """
 
     _global_filter_conditions: tuple[list, dict] = ([], {})
-    session: SessionLike | None = None
+    _session_provider: SessionProvider | None = None
+    _query_factory: QueryFactory | None = None
     _default_error_policy: ErrorPolicy = "raise"
     _logger: ErrorLogger = _DEFAULT_LOGGER
 
@@ -84,6 +117,7 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         self._sub_txn = None
         self._explicit_committed = False
         self._discarded = False
+        self._session: SessionLike | None = None
 
     def _resolve_error_policy(self) -> ErrorPolicy:
         """解析当前 CRUD 实例应采用的 error_policy。
@@ -102,8 +136,7 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
 
     def __enter__(self) -> Self:
         """进入上下文管理器并加入/创建事务域。"""
-        assert self.session is not None
-        session = self.session
+        session = self._get_session()
 
         state = _get_txn_state(session)
         joined_existing = bool(state is not None and state.active)
@@ -122,6 +155,7 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         state.depth += 1
 
         self._txn_state = state
+        self._session = session
         self._joined_txn = joined_existing
         self._explicit_committed = False
         self._discarded = False
@@ -132,16 +166,66 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         cls,
         *,
         session: SessionLike | None = None,
+        session_provider: SessionProvider | None = None,
+        query_factory: QueryFactory | None = None,
         error_logger: ErrorLogger | None = None,
         error_policy: ErrorPolicy | None = None,
     ) -> None:
-        """配置 CRUD 所依赖的会话与日志和默认策略（类级别）。"""
-        if session is not None:
-            cls.session = session
+        """配置 CRUD 所依赖的会话 provider、查询构造与日志和默认策略（类级别）。"""
+        if session is not None and session_provider is not None:
+            raise ValueError("Provide either session or session_provider, not both.")
+
+        if session_provider is not None:
+            cls._session_provider = session_provider
+        elif session is not None:
+            cls._session_provider = lambda: session
+        else:
+            raise ValueError(
+                "session_provider is required (or pass session to be wrapped)."
+            )
+
+        if query_factory is not None:
+            cls._query_factory = query_factory
+
         if error_logger is not None:
             cls._logger = error_logger
         if error_policy is not None:
             cls._default_error_policy = error_policy
+
+    @classmethod
+    def _get_session_provider(cls) -> SessionProvider:
+        if cls._session_provider is None:
+            raise RuntimeError(
+                "CRUD session is not configured. Please call "
+                "CRUD.configure(session_provider=...) before using CRUD."
+            )
+        return cls._session_provider
+
+    def _get_session(self) -> SessionLike:
+        provider = self._get_session_provider()
+        return cast(SessionLike, provider())
+
+    def _get_query_factory(self) -> QueryFactory:
+        if self._query_factory is not None:
+            return self._query_factory
+        if type(self)._query_factory is not None:
+            return cast(QueryFactory, type(self)._query_factory)
+        return lambda model, session: _default_query_factory(model, session, self)
+
+    def _require_session(self) -> SessionLike:
+        if self._session is None:
+            raise RuntimeError("CRUD session is not bound to current context.")
+        return self._session
+
+    @property
+    def session(self) -> SessionViewType:
+        """返回一个受控 Session 视图。
+
+        - 只应在 with CRUD(...) 上下文内部使用；
+        - commit/rollback 会被重定向到 CRUD.commit / CRUD.discard。
+        """
+        session = self._require_session()
+        return _SessionView(self, session)
 
     def config(
         self,
@@ -186,16 +270,14 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                     raise ValueError()
                 bound_sess = object_session(instance)
                 need_merge = (not insp.transient) or (
-                    bound_sess is not None and bound_sess is not self.session
+                    bound_sess is not None and bound_sess is not self._session
                 )
             except Exception:  # pylint: disable=broad-exception-caught
                 need_merge = True
 
-            assert self.session is not None
+            session = self._require_session()
             target = (
-                cast(ModelTypeVar, self.session.merge(instance))
-                if need_merge
-                else instance
+                cast(ModelTypeVar, session.merge(instance)) if need_merge else instance
             )
 
             if kwargs:
@@ -203,10 +285,9 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                 if updated is not None:
                     target = updated
 
-            assert self.session is not None
-            self.session.add(target)
+            session.add(target)
             # 立即 flush，以便为调用方提供主键等数据库生成字段
-            self.session.flush()
+            session.flush()
             self._need_commit = True
             self._mark_dirty()
             return target
@@ -237,14 +318,14 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                         raise ValueError()
                     bound_sess = object_session(instance)
                     need_merge = (not insp.transient) or (
-                        bound_sess is not None and bound_sess is not self.session
+                        bound_sess is not None and bound_sess is not self._session
                     )
                 except Exception:  # pylint: disable=broad-exception-caught
                     need_merge = True
 
-                assert self.session is not None
+                session = self._require_session()
                 target = (
-                    cast(ModelTypeVar, self.session.merge(instance))
+                    cast(ModelTypeVar, session.merge(instance))
                     if need_merge
                     else instance
                 )
@@ -255,9 +336,9 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                         continue
                 managed_instances.append(target)
 
-            assert self.session is not None
-            self.session.add_all(managed_instances)
-            self.session.flush()
+            session = self._require_session()
+            session.add_all(managed_instances)
+            session.flush()
             self._need_commit = True
             self._mark_dirty()
             return managed_instances
@@ -272,7 +353,11 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         self, *args, pure: bool = False, **kwargs
     ) -> CRUDQuery[ModelTypeVar, ModelTypeVar]:
         """构造带有默认过滤条件的查询对象。"""
-        query = cast(Query, self._model.query)
+        session = self._require_session()
+        base_query = self._get_query_factory()(self._model, session)
+        query = cast(
+            Query, base_query.query if isinstance(base_query, CRUDQuery) else base_query
+        )
         if not pure:
             if self._instance_default_kwargs:
                 query = query.filter_by(**self._instance_default_kwargs)
@@ -325,8 +410,8 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                 return None
 
             self._ensure_sub_txn()
-            assert self.session is not None
-            no_autoflush_cm = self.session.no_autoflush
+            session = self._require_session()
+            no_autoflush_cm = session.no_autoflush
             assert no_autoflush_cm is not None
             with no_autoflush_cm:
                 for k, v in kwargs.items():
@@ -350,10 +435,10 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
     ) -> bool:
         """删除单条或多条记录。"""
         try:
-            assert self.session is not None
+            session = self._require_session()
             if instance:
                 self._ensure_sub_txn()
-                self.session.delete(instance)
+                session.delete(instance)
             else:
                 if query is None:
                     query = self.query()
@@ -367,7 +452,7 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                 if all_records:
                     query.delete(synchronize_session=sync)
                 else:
-                    self.session.delete(first_inst)
+                    session.delete(first_inst)
 
             self._need_commit = True
             self._mark_dirty()
@@ -388,17 +473,17 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
     def commit(self) -> None:
         """显式提交当前子事务或会话。"""
         try:
-            assert self.session is not None
+            session = self._require_session()
             if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                 self._sub_txn.commit()
             else:
-                self.session.commit()
+                session.commit()
             self._explicit_committed = True
             self._need_commit = False
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self._logger("CRUD commit failed: %s", exc)
-            if self.session is not None:
-                self.session.rollback()
+            if self._session is not None:
+                self._session.rollback()
 
     def discard(self) -> None:
         """显式回滚当前事务，并标记上下文为已丢弃。
@@ -407,11 +492,11 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         - 仅通过 `_discarded` 标记告知 __exit__ 执行回滚。
         """
         try:
-            assert self.session is not None
+            session = self._require_session()
             if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                 self._sub_txn.rollback()
             else:
-                self.session.rollback()
+                session.rollback()
         finally:
             self._need_commit = False
             self._discarded = True
@@ -426,7 +511,9 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
             status,
         )
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # pylint: disable=too-many-branches,too-many-nested-blocks
+    def __exit__(
+        self, exc_type, exc_val, exc_tb
+    ) -> None:  # pylint: disable=too-many-branches,too-many-nested-blocks
         # 对于非 SQLAlchemy 异常，始终向外抛出；
         # SQLAlchemyError 的抛出与否由 error_policy 决定，
         # 在事务装饰器或 _on_sql_error 中处理。
@@ -462,8 +549,8 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                     raise
 
             # 基于通用事务状态机调整深度，并在最外层执行提交/回滚
-            if self.session is not None:
-                session = self.session
+            if self._session is not None:
+                session = self._session
                 state = _get_txn_state(session)
                 joined_existing = getattr(self, "_joined_txn", False)
 
@@ -481,7 +568,9 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                                 and not joined_existing
                             ):
                                 session.commit()
-                        except Exception as exc:  # pylint: disable=broad-exception-caught
+                        except (
+                            Exception
+                        ) as exc:  # pylint: disable=broad-exception-caught
                             self._logger(
                                 "CRUD commit/rollback failed: %s",
                                 exc,
@@ -493,14 +582,14 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
                             raise
         finally:
             # Session 的生命周期由外部（如应用框架）负责管理。
-            pass
+            self._session = None
 
     def _ensure_sub_txn(self) -> None:
         """确保当前存在一个活跃的子事务。"""
         if not (self._sub_txn and self._sub_txn.is_active):
             try:
-                assert self.session is not None
-                self._sub_txn = self.session.begin_nested()
+                session = self._require_session()
+                self._sub_txn = session.begin_nested()
             except Exception:  # pylint: disable=broad-exception-caught
                 self._sub_txn = None
 
@@ -513,11 +602,11 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         self.error = e
         self.status = SQLStatus.SQL_ERR
         try:
-            assert self.session is not None
+            session = self._require_session()
             if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                 self._sub_txn.rollback()
             else:
-                self.session.rollback()
+                session.rollback()
         except Exception:  # pylint: disable=broad-exception-caught
             self._logger("CRUD SQL rollback failed", exc_info=True)
         self._need_commit = False
@@ -545,7 +634,8 @@ class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attribut
         )
 
         def session_factory() -> SessionLike:
-            return _get_session_for_cls(cls)
+            provider = cls._get_session_provider()
+            return provider()
 
         return _txn_transaction(
             session_factory,
