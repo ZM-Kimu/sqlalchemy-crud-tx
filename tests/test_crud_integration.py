@@ -3,6 +3,8 @@ import sys
 
 import pytest
 from sqlalchemy import func
+from sqlalchemy.exc import InvalidRequestError
+from sqlalchemy.orm import object_session
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR / "src"
@@ -244,3 +246,186 @@ def test_query_count_order_by_group_by(app_and_db) -> None:
             assert total == len(emails)
             # 理论上会有 1~2 个分组（全偶 / 全奇 / 混合），只需要确认 group_by 正常工作
             assert 1 <= len(grouped) <= 2
+
+
+def test_add_many_and_global_filters(app_and_db) -> None:
+    """覆盖 add_many 及全局过滤器的启用/禁用行为。"""
+    app, db, User, _Profile = app_and_db
+    _cleanup_all(app, db, User)
+
+    with app.app_context():
+        CRUD.configure(session=db.session, error_policy="raise")
+
+        # add_many：应批量插入并返回带主键的实例列表
+        first = User(email="first@example.com")
+        second = User(email="second@test.com")
+        with CRUD(User) as crud:
+            added = crud.add_many([first, second])
+            assert added is not None
+            assert {u.email for u in added} == {
+                "first@example.com",
+                "second@test.com",
+            }
+            assert all(u.id is not None for u in added)
+
+        # 启用全局过滤器，仅保留 example.com 邮箱
+        CRUD.register_global_filters(User.email.like("%@example.com"))
+        try:
+            with CRUD(User) as crud_filtered:
+                filtered = crud_filtered.all()
+                assert {u.email for u in filtered} == {"first@example.com"}
+                db.session.rollback()  # 结束只读事务，避免后续 begin 冲突
+
+            # 禁用全局过滤器，验证可以取回全部记录
+            with CRUD(User).config(disable_global_filter=True) as crud_unfiltered:
+                all_users = crud_unfiltered.all()
+                assert {u.email for u in all_users} == {
+                    "first@example.com",
+                    "second@test.com",
+                }
+        finally:
+            CRUD.register_global_filters()  # 恢复默认
+            _cleanup_all(app, db, User)
+
+
+def test_create_instance_and_explicit_commit(app_and_db) -> None:
+    """覆盖 create_instance(no_attach) 与显式 commit 的路径。"""
+    app, db, User, _Profile = app_and_db
+    _cleanup_all(app, db, User)
+
+    with app.app_context():
+        CRUD.configure(session=db.session, error_policy="raise")
+
+        # create_instance(no_attach) 不应绑定 CRUD 实例或 Session
+        crud_tmp = CRUD(User)
+        detached = crud_tmp.create_instance(no_attach=True)
+        assert crud_tmp.instance is None
+        assert detached.id is None
+        assert object_session(detached) is None
+
+        @CRUD.transaction()
+        def create_with_explicit_commit() -> None:
+            with CRUD(User) as crud:
+                user = crud.add(email="explicit@example.com")
+                assert user is not None
+                crud.commit()  # 覆盖显式提交路径
+
+        create_with_explicit_commit()
+        assert db.session.query(User).count() == 1
+
+
+def test_pure_query_and_all_records_delete(app_and_db) -> None:
+    """覆盖 query(pure=True) 以及 delete(all_records=True) 的分支。"""
+    app, db, User, _Profile = app_and_db
+    _cleanup_all(app, db, User)
+
+    with app.app_context():
+        CRUD.configure(session=db.session)
+        emails = ["keep@example.com", "drop@example.com"]
+        for email in emails:
+            with CRUD(User) as crud:
+                crud.add(email=email)
+
+        # 构造实例级过滤条件：email="keep@example.com"
+        with CRUD(User, email="keep@example.com") as crud_filtered:
+            # 默认 query 应只看到一条
+            assert crud_filtered.query().count() == 1
+            filtered_first = crud_filtered.first()
+            assert filtered_first is not None
+            assert filtered_first.email == "keep@example.com"
+
+            # pure=True 应忽略实例过滤条件，返回两条
+            pure_all = crud_filtered.query(pure=True).all()
+            assert {u.email for u in pure_all} == set(emails)
+
+        db.session.rollback()  # 结束读事务，避免后续 begin 冲突
+
+        # all_records=True 删除全部
+        with CRUD(User) as crud_delete:
+            ok = crud_delete.delete(all_records=True)
+            assert ok is True
+            assert crud_delete.status == SQLStatus.OK
+
+        assert db.session.query(User).count() == 0
+
+
+def test_need_commit_marks_dirty_without_mutation(app_and_db) -> None:
+    """need_commit 应促使退出上下文时提交事务。"""
+    app, db, User, _Profile = app_and_db
+    _cleanup_all(app, db, User)
+
+    with app.app_context():
+        CRUD.configure(session=db.session)
+
+        with CRUD(User) as crud:
+            user = crud.add(email="need-commit@example.com")
+            assert user is not None
+            crud.need_commit()
+
+        assert db.session.query(User).count() == 1
+
+
+def test_error_policy_inherits_from_transaction_decorator(app_and_db) -> None:
+    """事务装饰器的 error_policy 应被 CRUD 实例继承并用于 _resolve_error_policy。"""
+    app, db, User, _Profile = app_and_db
+    _cleanup_all(app, db, User)
+
+    with app.app_context():
+        CRUD.configure(session=db.session, error_policy="raise")
+
+        # 先插入一条记录，后续重复插入触发唯一约束
+        with CRUD(User) as crud:
+            crud.add(email="dup@example.com")
+
+        @CRUD.transaction(error_policy="status")
+        def create_duplicate() -> None:
+            with CRUD(User) as crud_dup:
+                # 触发唯一约束导致 SQLAlchemyError，但 error_policy=status 不应向外抛出
+                crud_dup.add(email="dup@example.com")
+
+        create_duplicate()
+        # 事务应回滚，仍然只有一条记录
+        assert db.session.query(User).count() == 1
+
+
+def test_crud_conflicts_with_external_manual_transaction(app_and_db) -> None:
+    """外部已 begin 的事务未被 CRUD 状态机感知时，应触发冲突错误。"""
+    app, db, User, _Profile = app_and_db
+    _cleanup_all(app, db, User)
+
+    with app.app_context():
+        CRUD.configure(session=db.session)
+        txn = db.session.begin()
+        try:
+            with pytest.raises(InvalidRequestError):
+                with CRUD(User):
+                    pass
+        finally:
+            if txn.is_active:
+                txn.rollback()
+        db.session.expunge_all()
+
+
+def test_transaction_decorator_conflicts_with_external_manual_transaction(
+    app_and_db,
+) -> None:
+    """事务装饰器在外部手动 begin 时也会因重复 begin 抛出冲突。"""
+    app, db, User, _Profile = app_and_db
+    _cleanup_all(app, db, User)
+
+    with app.app_context():
+        CRUD.configure(session=db.session)
+        txn = db.session.begin()
+        try:
+
+            @CRUD.transaction()
+            def create_user_inside() -> None:
+                with CRUD(User) as crud:
+                    crud.add(email="conflict@example.com")
+
+            with pytest.raises(InvalidRequestError):
+                create_user_inside()
+        finally:
+            if txn.is_active:
+                txn.rollback()
+        db.session.expunge_all()
