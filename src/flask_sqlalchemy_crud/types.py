@@ -1,9 +1,9 @@
-"""类型别名与 Session 类型定义。"""
+"""Type aliases and Session-related protocol definitions."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 from sqlalchemy.orm import Session as _Session
 from sqlalchemy.orm import scoped_session as _ScopedSession
@@ -14,21 +14,26 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class ORMModel(Protocol):
-    """最小模型能力约束，便于与纯 SQLAlchemy/Flask-SQLAlchemy 兼容。"""
+    """Minimal capabilities required for ORM models.
+
+    Designed to be compatible with both plain SQLAlchemy and Flask-SQLAlchemy
+    declarative models without importing their concrete base classes.
+    """
 
     __table__: Any
 
 
 ModelTypeVar = TypeVar("ModelTypeVar", bound=ORMModel)
-ResultTypeVar = TypeVar("ResultTypeVar", covariant=True)
+ResultTypeVar_co = TypeVar("ResultTypeVar_co", covariant=True)
 EntityTypeVar = TypeVar("EntityTypeVar")
 
 ErrorLogger = Callable[..., None]
 
-# 在本库中，SessionLike 视作 SQLAlchemy ORM Session 或其 scoped_session 包装。
-# 这样 IDE 和类型检查器可以完整复用 SQLAlchemy 自带的类型注解，
-# 同时兼容 Flask-SQLAlchemy 提供的 scoped_session[Session] 类型。
-SessionLike = _Session | _ScopedSession[_Session]
+# In this library, ``SessionLike`` is treated as a SQLAlchemy ORM ``Session``
+# or a ``scoped_session[Session]`` wrapper. This lets IDEs and type checkers
+# reuse SQLAlchemy's own type hints while remaining compatible with
+# Flask-SQLAlchemy's scoped sessions.
+SessionLike: TypeAlias = _Session | _ScopedSession[_Session]
 
 SessionProvider = Callable[[], SessionLike]
 QueryFactory = Callable[

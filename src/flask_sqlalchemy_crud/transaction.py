@@ -1,4 +1,4 @@
-"""通用事务状态机与装饰器实现。"""
+"""Generic transaction state machine and decorator implementation."""
 
 from __future__ import annotations
 
@@ -21,19 +21,20 @@ SessionFactory: TypeAlias = Callable[[], SessionLike]
 
 
 class _TxnState:
-    """与单个 Session 关联的事务状态。
+    """Transaction state associated with a single Session.
 
-    由通用事务状态机与 CRUD 上下文共同使用，用于维护：
-    - join 深度（depth）
-    - 是否存在活跃事务（active）
+    Shared between the generic transaction state machine and CRUD contexts to
+    track:
+    - join depth (``depth``);
+    - whether there is an active transaction (``active``).
     """
 
     __slots__ = ("session", "depth", "active")
 
     def __init__(self, session: SessionLike) -> None:
         self.session: SessionLike = session
-        self.depth: int = 0  # 当前 join 深度
-        self.active: bool = False  # 是否存在活跃事务
+        self.depth: int = 0  # current join depth
+        self.active: bool = False  # whether there is an active transaction
 
 
 _TxnMap: TypeAlias = dict[int, _TxnState]
@@ -45,9 +46,10 @@ _current_error_policy: ContextVar[ErrorPolicy | None] = ContextVar(
 
 
 def _get_txn_map() -> _TxnMap:
-    """获取当前上下文下的事务状态映射。
+    """Return the transaction state mapping for the current ContextVar scope.
 
-    以 Session 对象的 id 为键，存储对应的 `_TxnState`。
+    The mapping uses ``id(Session)`` as the key and stores the corresponding
+    ``_TxnState``.
     """
     try:
         return _current_txn_map.get()
@@ -58,14 +60,15 @@ def _get_txn_map() -> _TxnMap:
 
 
 def _get_txn_state(session: SessionLike) -> _TxnState | None:
-    """返回给定 Session 关联的事务状态（若存在）。"""
+    """Return the transaction state associated with a Session, if any."""
     return _get_txn_map().get(id(session))
 
 
 def _get_or_create_txn_state(session: SessionLike) -> _TxnState:
-    """获取或创建给定 Session 的事务状态。
+    """Get or create the transaction state for the given Session.
 
-    事务状态机基于该结构实现 join / 嵌套等语义。
+    The transaction state machine uses this structure to implement join/nested
+    semantics.
     """
     mapping = _get_txn_map()
     key = id(session)
@@ -77,7 +80,7 @@ def _get_or_create_txn_state(session: SessionLike) -> _TxnState:
 
 
 def get_current_error_policy() -> ErrorPolicy | None:
-    """返回当前上下文中的 error_policy（若由事务装饰器设置）。"""
+    """Return the current ``error_policy`` from the ContextVar, if any."""
     try:
         return _current_error_policy.get()
     except LookupError:
@@ -85,13 +88,14 @@ def get_current_error_policy() -> ErrorPolicy | None:
 
 
 class _TxnContext:
-    """事务上下文管理器的基础骨架。
+    """Basic building block for a transaction context manager.
 
-    当前仅作为内部预留工具：
-    - 通过 `SessionFactory` 获取 Session 对象；
-    - 建立与该 Session 相关联的 `_TxnState`。
+    Currently only used as an internal helper:
+    - obtains a Session via ``SessionFactory``;
+    - ensures there is a ``_TxnState`` associated with that Session.
 
-    提交 / 回滚等行为由 `transaction(...)` 中的事务状态机统一处理。
+    Commit/rollback behaviour is handled by the generic ``transaction(...)``
+    decorator.
     """
 
     __slots__ = ("_session_factory", "_session", "_state")
@@ -117,8 +121,8 @@ class _TxnContext:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> Literal[False]:
-        # 提交 / 回滚逻辑由通用 transaction 装饰器控制；
-        # 该基础上下文本身不做任何数据库操作。
+        # Commit/rollback logic is handled by the generic transaction decorator;
+        # this context itself never touches the database.
         return False
 
 
@@ -126,32 +130,35 @@ def transaction(
     session_factory: SessionFactory,
     *,
     join: bool = True,
-    nested: bool | None = None,  # noqa: ARG001 - 预留参数，当前未使用
+    # nested: bool | None = None, TODO: Implement soon
     error_policy: ErrorPolicy = "raise",
 ) -> TransactionDecorator[P, R]:
-    """通用事务装饰器。
+    """Generic transaction decorator.
 
-    - 每次函数调用对应一个“事务域”，除非根据 join 规则加入已有事务。
-    - 默认遵循 join 语义：若当前上下文中已存在针对同一 Session 的事务，则加入该事务，仅由最外层调用负责最终 commit/rollback。
-    - error_policy 仅对 SQLAlchemyError 生效：
-        - "raise": 回滚后重新抛出数据库异常。
-        - "status": 回滚后吞掉数据库异常，由调用方通过其他渠道检查状态。
-        - 非数据库异常在任意策略下都会回滚并原样抛出。
+    - Each function call corresponds to a "transaction scope", unless the call
+      joins an already active transaction according to the ``join`` rules.
+    - Default join semantics: if there is an active transaction for the same
+      Session, join it and let only the outermost call perform commit/rollback.
+    - ``error_policy`` only affects ``SQLAlchemyError``:
+        - ``"raise"``: rollback and then re-raise the database error;
+        - ``"status"``: rollback and swallow the database error so callers can
+          inspect status via other channels;
+        - non-database exceptions always cause rollback and are re-raised.
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            # 获取 Session 与其事务状态
+            # Obtain Session and its transaction state mapping.
             session = session_factory()
             state = _get_txn_state(session)
 
-            # 是否加入已有事务
+            # Whether to join an existing transaction.
             joining_existing = bool(join and state is not None and state.active)
 
             token = None
 
             try:
-                # 若无活跃事务，则创建新的事务状态并开启数据库事务
+                # If there is no active transaction, create state and begin one.
                 if not joining_existing:
                     state = _get_or_create_txn_state(session)
                     state.depth = 0
@@ -161,7 +168,6 @@ def transaction(
                     except Exception:
                         state.active = False
                         raise
-                    # 仅在最外层事务中设置 error_policy 上下文
                     token = _current_error_policy.set(error_policy)
 
                 assert state is not None
@@ -176,42 +182,40 @@ def transaction(
                 except BaseException as exc:
                     captured_exc = exc
 
-                    # 仅最外层事务负责执行数据库 rollback
                     if not joining_existing:
                         try:
                             session.rollback()
-                        except Exception:  # pylint: disable=broad-exception-caught
-                            # 回滚失败时不屏蔽原始异常
+                        except Exception:
+                            # Rollback failure should not mask the original exception.
                             pass
 
                     is_db_error = isinstance(exc, SQLAlchemyError)
 
-                    # 非数据库异常：总是抛出
                     if not is_db_error:
                         raise
 
-                    # 数据库异常：根据 error_policy 决定是否抛出
+                    # DB errors may be re-raised depending on error_policy
                     if error_policy == "raise":
                         raise
 
-                    # error_policy == "status"：吞掉数据库异常，
-                    # 由上层（例如 CRUD）通过其他途径记录错误状态。
+                    # error_policy == "status": swallow SQLAlchemyError,
+                    # caller (e.g., CRUD) should record status separately.
                     return cast(R, None)
                 finally:
-                    # 只有在状态仍然活跃时才调整深度
+                    # Only adjust depth while state is still active.
                     if state.active:
                         state.depth -= 1
                         if state.depth <= 0:
                             state.active = False
-                            # 最外层且无异常时提交
+                            # Commit only when outermost and no exception.
                             if captured_exc is None and not joining_existing:
                                 try:
                                     session.commit()
                                 except Exception as commit_exc:
-                                    # 提交失败时尝试回滚并抛出提交异常
+                                    # On commit failure, attempt rollback then re-raise.
                                     try:
                                         session.rollback()
-                                    except Exception:  # pragma: no cover - 防御性回滚
+                                    except Exception:
                                         pass
                                     raise commit_exc
             finally:

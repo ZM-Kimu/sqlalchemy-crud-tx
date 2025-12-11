@@ -1,4 +1,4 @@
-"""公开 flask_sqlalchemy_crud 包的主要接口。"""
+"""Public entry points for the flask_sqlalchemy_crud package."""
 
 from .core import CRUD, CRUDQuery, ErrorLogger, SQLStatus
 

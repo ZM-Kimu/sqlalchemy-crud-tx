@@ -1,10 +1,10 @@
-"""SQLAlchemy 操作状态枚举。"""
+"""Enum describing SQLAlchemy operation status codes."""
 
 from enum import IntEnum
 
 
 class SQLStatus(IntEnum):
-    """SQLAlchemy 操作状态。"""
+    """Status of SQLAlchemy operations."""
 
     OK = 0
     SQL_ERR = 1

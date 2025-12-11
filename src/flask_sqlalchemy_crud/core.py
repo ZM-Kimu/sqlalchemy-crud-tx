@@ -1,6 +1,7 @@
-"""核心类型与别名导出模块。
+"""Core re-export module for public types.
 
-用于集中 re-export CRUD / CRUDQuery / SQLStatus 及相关类型别名，方便上层统一导入。
+Centralizes export of ``CRUD`` / ``CRUDQuery`` / ``SQLStatus`` and related
+type aliases so that callers can import from a single place.
 """
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ from __future__ import annotations
 from .crud import CRUD
 from .query import CRUDQuery
 from .status import SQLStatus
-from .types import ErrorLogger, EntityTypeVar, ModelTypeVar, ResultTypeVar
+from .types import EntityTypeVar, ErrorLogger, ModelTypeVar, ResultTypeVar_co
 
 __all__ = [
     "CRUD",
@@ -16,6 +17,6 @@ __all__ = [
     "SQLStatus",
     "ErrorLogger",
     "ModelTypeVar",
-    "ResultTypeVar",
+    "ResultTypeVar_co",
     "EntityTypeVar",
 ]

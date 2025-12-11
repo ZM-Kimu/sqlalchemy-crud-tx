@@ -1,36 +1,29 @@
-"""对 SQLAlchemy Query 的轻量包装，提供类型友好的 CRUDQuery 接口。"""
+"""Lightweight wrapper around SQLAlchemy ``Query`` with type-friendly API."""
 
+from collections.abc import Iterator
 from functools import wraps
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Generic,
-    Iterator,
-    Optional,
-    TypeVar,
-    cast,
-    overload,
-)
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 from sqlalchemy.orm import Query
 
-from .types import ModelTypeVar, ResultTypeVar
+from .types import ORMModel
 
-if TYPE_CHECKING:  # 仅用于类型检查，避免运行时循环依赖
+if TYPE_CHECKING:
     from .crud import CRUD
 
+ModelTypeVar = TypeVar("ModelTypeVar", bound=ORMModel)
+ResultTypeVar_co = TypeVar("ResultTypeVar_co", covariant=True)
 
 _E = TypeVar("_E")
 
 
-class CRUDQuery(
-    Generic[ModelTypeVar, ResultTypeVar]
-):  # pylint: disable=missing-function-docstring
-    """Query 包装器。
+class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar_co]):
+    """Query wrapper used by CRUD.
 
-    - 保留 SQLAlchemy 原生 Query 功能，同时增加类型提示与链式体验。
-    - 通过 __getattr__ 委托未覆盖的方法，确保与既有代码兼容。
-    - 终结方法（first/all/...）直接调用底层 Query。
+    - Preserves the underlying SQLAlchemy ``Query`` functionality.
+    - Adds type parameters and a chainable interface.
+    - Delegates unknown attributes/methods to the wrapped ``Query``.
+    - Terminal methods (``first/all/...``) call the underlying ``Query``.
     """
 
     __slots__ = ("_crud", "_query")
@@ -41,30 +34,37 @@ class CRUDQuery(
 
     @property
     def query(self) -> Query:
-        """返回底层 SQLAlchemy Query。"""
+        """Return the underlying SQLAlchemy ``Query`` object."""
         return self._query
 
-    def _wrap(self, query: Query) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def _wrap(self, query: Query) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Return a new CRUDQuery wrapping the given Query."""
         return cast(
-            "CRUDQuery[ModelTypeVar, ResultTypeVar]", CRUDQuery(self._crud, query)
+            "CRUDQuery[ModelTypeVar, ResultTypeVar_co]", CRUDQuery(self._crud, query)
         )
 
-    def join(self, *args, **kwargs) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def join(self, *args, **kwargs) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply ``Query.join`` and return a wrapped CRUDQuery."""
         return self._wrap(self._query.join(*args, **kwargs))
 
-    def outerjoin(self, *args, **kwargs) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def outerjoin(self, *args, **kwargs) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply ``Query.outerjoin`` and return a wrapped CRUDQuery."""
         return self._wrap(self._query.outerjoin(*args, **kwargs))
 
-    def filter(self, *criterion) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def filter(self, *criterion) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply ``Query.filter`` with the given criteria."""
         return self._wrap(self._query.filter(*criterion))
 
-    def filter_by(self, **kwargs) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def filter_by(self, **kwargs) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply ``Query.filter_by`` with the given keyword filters."""
         return self._wrap(self._query.filter_by(**kwargs))
 
-    def distinct(self, *criterion) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def distinct(self, *criterion) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply ``Query.distinct`` and return a wrapped CRUDQuery."""
         return self._wrap(self._query.distinct(*criterion))
 
-    def options(self, *options) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def options(self, *options) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply loader options via ``Query.options`` and return a wrapped CRUDQuery."""
         return self._wrap(self._query.options(*options))
 
     @overload
@@ -76,75 +76,89 @@ class CRUDQuery(
     ) -> "CRUDQuery[ModelTypeVar, tuple[Any, ...]]": ...
 
     def with_entities(self, *entities: Any) -> "CRUDQuery[ModelTypeVar, Any]":
-        """切换查询实体。
+        """Change the selected entities.
 
-        - 单个实体：`CRUDQuery[Model, E]`
-        - 多个实体：`CRUDQuery[Model, tuple[Any, ...]]`
+        - Single entity: ``CRUDQuery[Model, E]``.
+        - Multiple entities: ``CRUDQuery[Model, tuple[Any, ...]]``.
         """
         new_query = self._query.with_entities(*entities)
         return CRUDQuery(self._crud, new_query)
 
-    def order_by(self, *clauses) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def order_by(self, *clauses) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply ordering via ``Query.order_by`` and return a wrapped CRUDQuery."""
         return self._wrap(self._query.order_by(*clauses))
 
-    def group_by(self, *clauses) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def group_by(self, *clauses) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply grouping via ``Query.group_by`` and return a wrapped CRUDQuery."""
         return self._wrap(self._query.group_by(*clauses))
 
-    def having(self, *criterion) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def having(self, *criterion) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply ``Query.having`` and return a wrapped CRUDQuery."""
         return self._wrap(self._query.having(*criterion))
 
-    def limit(self, limit: int | None) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def limit(self, limit: int | None) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply a row limit via ``Query.limit`` and return a wrapped CRUDQuery."""
         return self._wrap(self._query.limit(limit))
 
-    def offset(self, offset: int | None) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def offset(self, offset: int | None) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply an offset via ``Query.offset`` and return a wrapped CRUDQuery."""
         return self._wrap(self._query.offset(offset))
 
-    def select_from(self, *entities) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    def select_from(self, *entities) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply ``Query.select_from`` with the given entities."""
         return self._wrap(self._query.select_from(*entities))
 
     def execution_options(
         self, *args, **kwargs
-    ) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    ) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Apply execution options via ``Query.execution_options``."""
         return self._wrap(self._query.execution_options(*args, **kwargs))
 
     def enable_eagerloads(
         self, value: bool
-    ) -> "CRUDQuery[ModelTypeVar, ResultTypeVar]":
+    ) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+        """Enable or disable eager loading on the underlying query."""
         return self._wrap(self._query.enable_eagerloads(value))
 
-    def all(self) -> list[ResultTypeVar]:
+    def all(self) -> list[ResultTypeVar_co]:
+        """Return all results from the underlying query."""
         return self._query.all()
 
-    def first(self) -> ResultTypeVar | None:
+    def first(self) -> ResultTypeVar_co | None:
+        """Return the first result (or ``None``) from the underlying query."""
         return self._query.first()
 
-    def one(self) -> ResultTypeVar:
+    def one(self) -> ResultTypeVar_co:
+        """Return exactly one result from the underlying query or raise."""
         return self._query.one()
 
-    def one_or_none(self) -> ResultTypeVar | None:
+    def one_or_none(self) -> ResultTypeVar_co | None:
+        """Return one result or ``None`` from the underlying query."""
         return self._query.one_or_none()
 
-    def scalar(self) -> Optional[ResultTypeVar]:
+    def scalar(self) -> ResultTypeVar_co | None:
+        """Return a scalar value from the underlying query (or ``None``)."""
         result = self._query.scalar()
-        return cast(Optional[ResultTypeVar], result)
+        return cast(ResultTypeVar_co | None, result)
 
     def count(self) -> int:
+        """Return the row count for the underlying query."""
         return self._query.count()
 
     def paginate(self, *args, **kwargs):
+        """Delegate to ``Query.paginate`` (Flask-SQLAlchemy style pagination)."""
         return self._query.paginate(*args, **kwargs)
 
     def raw(self) -> Query:
+        """Return the raw underlying SQLAlchemy ``Query`` instance."""
         return self._query
 
-    @property
-    def session(self):
-        return self._query.session
-
-    def __iter__(self) -> Iterator[ResultTypeVar]:
+    def __iter__(self) -> Iterator[ResultTypeVar_co]:
+        """Iterate over results from the underlying query."""
         return iter(self._query)
 
     def __getitem__(self, item):
+        """Delegate ``[]`` access to the underlying query."""
         return self._query[item]
 
     def __getattr__(self, item):
