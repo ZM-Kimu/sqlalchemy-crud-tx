@@ -36,6 +36,6 @@ ErrorLogger = Callable[..., None]
 SessionLike: TypeAlias = _Session | _ScopedSession[_Session]
 
 SessionProvider = Callable[[], SessionLike]
-QueryFactory = Callable[
+QueryBuilder = Callable[
     [type[ModelTypeVar], SessionLike], "CRUDQuery[ModelTypeVar, Any]"
 ]

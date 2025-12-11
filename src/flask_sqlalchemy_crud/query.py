@@ -37,7 +37,7 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar_co]):
         """Return the underlying SQLAlchemy ``Query`` object."""
         return self._query
 
-    def _wrap(self, query: Query) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
+    def _clone_with(self, query: Query) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Return a new CRUDQuery wrapping the given Query."""
         return cast(
             "CRUDQuery[ModelTypeVar, ResultTypeVar_co]", CRUDQuery(self._crud, query)
@@ -45,27 +45,27 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar_co]):
 
     def join(self, *args, **kwargs) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply ``Query.join`` and return a wrapped CRUDQuery."""
-        return self._wrap(self._query.join(*args, **kwargs))
+        return self._clone_with(self._query.join(*args, **kwargs))
 
     def outerjoin(self, *args, **kwargs) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply ``Query.outerjoin`` and return a wrapped CRUDQuery."""
-        return self._wrap(self._query.outerjoin(*args, **kwargs))
+        return self._clone_with(self._query.outerjoin(*args, **kwargs))
 
     def filter(self, *criterion) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply ``Query.filter`` with the given criteria."""
-        return self._wrap(self._query.filter(*criterion))
+        return self._clone_with(self._query.filter(*criterion))
 
     def filter_by(self, **kwargs) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply ``Query.filter_by`` with the given keyword filters."""
-        return self._wrap(self._query.filter_by(**kwargs))
+        return self._clone_with(self._query.filter_by(**kwargs))
 
     def distinct(self, *criterion) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply ``Query.distinct`` and return a wrapped CRUDQuery."""
-        return self._wrap(self._query.distinct(*criterion))
+        return self._clone_with(self._query.distinct(*criterion))
 
     def options(self, *options) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply loader options via ``Query.options`` and return a wrapped CRUDQuery."""
-        return self._wrap(self._query.options(*options))
+        return self._clone_with(self._query.options(*options))
 
     @overload
     def with_entities(self, entity: _E, /) -> "CRUDQuery[ModelTypeVar, _E]": ...
@@ -86,39 +86,39 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar_co]):
 
     def order_by(self, *clauses) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply ordering via ``Query.order_by`` and return a wrapped CRUDQuery."""
-        return self._wrap(self._query.order_by(*clauses))
+        return self._clone_with(self._query.order_by(*clauses))
 
     def group_by(self, *clauses) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply grouping via ``Query.group_by`` and return a wrapped CRUDQuery."""
-        return self._wrap(self._query.group_by(*clauses))
+        return self._clone_with(self._query.group_by(*clauses))
 
     def having(self, *criterion) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply ``Query.having`` and return a wrapped CRUDQuery."""
-        return self._wrap(self._query.having(*criterion))
+        return self._clone_with(self._query.having(*criterion))
 
     def limit(self, limit: int | None) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply a row limit via ``Query.limit`` and return a wrapped CRUDQuery."""
-        return self._wrap(self._query.limit(limit))
+        return self._clone_with(self._query.limit(limit))
 
     def offset(self, offset: int | None) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply an offset via ``Query.offset`` and return a wrapped CRUDQuery."""
-        return self._wrap(self._query.offset(offset))
+        return self._clone_with(self._query.offset(offset))
 
     def select_from(self, *entities) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply ``Query.select_from`` with the given entities."""
-        return self._wrap(self._query.select_from(*entities))
+        return self._clone_with(self._query.select_from(*entities))
 
     def execution_options(
         self, *args, **kwargs
     ) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Apply execution options via ``Query.execution_options``."""
-        return self._wrap(self._query.execution_options(*args, **kwargs))
+        return self._clone_with(self._query.execution_options(*args, **kwargs))
 
     def enable_eagerloads(
         self, value: bool
     ) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":
         """Enable or disable eager loading on the underlying query."""
-        return self._wrap(self._query.enable_eagerloads(value))
+        return self._clone_with(self._query.enable_eagerloads(value))
 
     def all(self) -> list[ResultTypeVar_co]:
         """Return all results from the underlying query."""

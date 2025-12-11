@@ -8,16 +8,14 @@ from typing import Literal, ParamSpec, TypeAlias, TypeVar, cast
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from .types import SessionLike
+from .types import SessionLike, SessionProvider
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
-ErrorPolicy = Literal["raise", "status"]
+ErrorPolicy = Literal["raise", "status_only"]
 
 TransactionDecorator: TypeAlias = Callable[[Callable[P, R]], Callable[P, R]]
-
-SessionFactory: TypeAlias = Callable[[], SessionLike]
 
 
 class _TxnState:
@@ -91,17 +89,17 @@ class _TxnContext:
     """Basic building block for a transaction context manager.
 
     Currently only used as an internal helper:
-    - obtains a Session via ``SessionFactory``;
+    - obtains a Session via ``SessionProvider``;
     - ensures there is a ``_TxnState`` associated with that Session.
 
     Commit/rollback behaviour is handled by the generic ``transaction(...)``
     decorator.
     """
 
-    __slots__ = ("_session_factory", "_session", "_state")
+    __slots__ = ("_session_provider", "_session", "_state")
 
-    def __init__(self, session_factory: SessionFactory) -> None:
-        self._session_factory = session_factory
+    def __init__(self, session_provider: SessionProvider) -> None:
+        self._session_provider = session_provider
         self._session: SessionLike | None = None
         self._state: _TxnState | None = None
 
@@ -115,7 +113,7 @@ class _TxnContext:
         return self._state
 
     def __enter__(self) -> "_TxnContext":
-        session = self._session_factory()
+        session = self._session_provider()
         self._session = session
         self._state = _get_or_create_txn_state(session)
         return self
@@ -127,33 +125,35 @@ class _TxnContext:
 
 
 def transaction(
-    session_factory: SessionFactory,
+    session_provider: SessionProvider,
     *,
-    join: bool = True,
+    join_existing: bool = True,
     # nested: bool | None = None, TODO: Implement soon
     error_policy: ErrorPolicy = "raise",
 ) -> TransactionDecorator[P, R]:
     """Generic transaction decorator.
 
     - Each function call corresponds to a "transaction scope", unless the call
-      joins an already active transaction according to the ``join`` rules.
+      joins an already active transaction according to the ``join_existing`` rules.
     - Default join semantics: if there is an active transaction for the same
       Session, join it and let only the outermost call perform commit/rollback.
     - ``error_policy`` only affects ``SQLAlchemyError``:
         - ``"raise"``: rollback and then re-raise the database error;
-        - ``"status"``: rollback and swallow the database error so callers can
-          inspect status via other channels;
+        - ``"status_only"``: rollback and swallow the database error so
+          callers can inspect status via other channels;
         - non-database exceptions always cause rollback and are re-raised.
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             # Obtain Session and its transaction state mapping.
-            session = session_factory()
+            session = session_provider()
             state = _get_txn_state(session)
 
             # Whether to join an existing transaction.
-            joining_existing = bool(join and state is not None and state.active)
+            joining_existing = bool(
+                join_existing and state is not None and state.active
+            )
 
             token = None
 
@@ -198,7 +198,7 @@ def transaction(
                     if error_policy == "raise":
                         raise
 
-                    # error_policy == "status": swallow SQLAlchemyError,
+                    # error_policy == "status_only": swallow SQLAlchemyError,
                     # caller (e.g., CRUD) should record status separately.
                     return cast(R, None)
                 finally:

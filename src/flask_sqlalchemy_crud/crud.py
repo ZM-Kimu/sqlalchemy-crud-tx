@@ -30,7 +30,7 @@ from .transaction import (
     get_current_error_policy,
 )
 from .transaction import transaction as _txn_transaction
-from .types import ErrorLogger, ORMModel, QueryFactory, SessionLike, SessionProvider
+from .types import ErrorLogger, ORMModel, QueryBuilder, SessionLike, SessionProvider
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -41,18 +41,18 @@ ResultTypeVar_co = TypeVar("ResultTypeVar_co", covariant=True)
 _DEFAULT_LOGGER: ErrorLogger = logging.getLogger("CRUD").error
 
 
-def _default_query_factory(
+def _default_query_builder(
     model: type[ModelTypeVar], session: SessionLike, crud: "CRUD[ModelTypeVar]"
 ) -> CRUDQuery[ModelTypeVar, ModelTypeVar]:
     """Build a query using plain SQLAlchemy Session (no Flask-SQLAlchemy dependency)."""
-    base_query = session.query(model)
-    return CRUDQuery(crud, cast(Query, base_query))
+    sa_query = session.query(model)
+    return CRUDQuery(crud, cast(Query, sa_query))
 
 
-class _SessionView:
-    """Session view exposed to callers.
+class SessionProxy:
+    """Session facade exposed to callers.
 
-    - Most methods delegate directly to the underlying Session.
+    - Delegates most methods directly to the underlying Session.
     - commit/rollback calls are redirected to CRUD.commit / CRUD.discard
       to avoid bypassing the CRUD transaction state machine.
     """
@@ -84,10 +84,9 @@ class _SessionView:
 
 
 if TYPE_CHECKING:
-    # SessionViewType: TypeAlias = SessionLike
     SessionViewType: TypeAlias = SessionLike
 else:
-    SessionViewType = _SessionView
+    SessionViewType = SessionProxy
 
 
 class CRUD(Generic[ModelTypeVar]):
@@ -100,7 +99,7 @@ class CRUD(Generic[ModelTypeVar]):
 
     _global_filter_conditions: tuple[list, dict] = ([], {})
     _session_provider: SessionProvider | None = None
-    _query_factory: QueryFactory | None = None
+    _query_builder: QueryBuilder | None = None
     _default_error_policy: ErrorPolicy = "raise"
     _logger: ErrorLogger = _DEFAULT_LOGGER
 
@@ -137,13 +136,13 @@ class CRUD(Generic[ModelTypeVar]):
         self._error_policy: ErrorPolicy | None = None
         self._apply_global_filters = True
         self._txn_state: _TxnState | None = None
-        self._joined_txn = False
-        self._sub_txn = None
+        self._joined_existing = False
+        self._nested_txn = None
         self._explicit_committed = False
         self._discarded = False
         self._session: SessionLike | None = None
 
-    def _resolve_error_policy(self) -> ErrorPolicy:
+    def resolve_error_policy(self) -> ErrorPolicy:
         """Resolve the effective ``error_policy`` for this CRUD instance.
 
         Priority order:
@@ -180,7 +179,7 @@ class CRUD(Generic[ModelTypeVar]):
 
         self._txn_state = state
         self._session = session
-        self._joined_txn = joined_existing
+        self._joined_existing = joined_existing
         self._explicit_committed = False
         self._discarded = False
         return self
@@ -189,52 +188,44 @@ class CRUD(Generic[ModelTypeVar]):
     def configure(
         cls,
         *,
-        session: SessionLike | None = None,
         session_provider: SessionProvider | None = None,
-        query_factory: QueryFactory | None = None,
-        error_logger: ErrorLogger | None = None,
+        query_builder: QueryBuilder | None = None,
+        logger: ErrorLogger | None = None,
         error_policy: ErrorPolicy | None = None,
     ) -> None:
-        """Configure session provider, query factory, logger and defaults.
+        """Configure session provider, query builder, logger and defaults.
 
         This is a class-level configuration and must be called before using
         ``CRUD(...)``.
 
         Args:
-            session: Concrete ``SessionLike`` instance to be wrapped into a
-                simple provider. Mutually exclusive with ``session_provider``.
             session_provider: Callable that returns a ``SessionLike``. This is
                 the preferred way to integrate with ``sessionmaker`` or custom
-                session management. Mutually exclusive with ``session``.
-            query_factory: Optional factory to build a ``CRUDQuery`` (or
+                session management.
+            query_builder: Optional builder to construct a ``CRUDQuery`` (or
                 Query-like object) from ``(model, session)``. When omitted the
-                default factory uses ``session.query(model)``.
-            error_logger: Optional logger callable used by CRUD to report
-                internal errors.
+                default builder uses ``session.query(model)``.
+            logger: Optional logger callable used by CRUD to report internal
+                errors.
             error_policy: Default error policy (``\"raise\"`` or ``\"status\"``)
                 applied when no transaction-scoped policy or per-instance
                 override is present.
         Raises:
-            ValueError: If both ``session`` and ``session_provider`` are
-                provided, or if neither is provided.
+            ValueError: If ``session_provider`` is not provided.
         """
-        if session is not None and session_provider is not None:
-            raise ValueError("Provide either session or session_provider, not both.")
-
-        if session_provider is not None:
-            cls._session_provider = session_provider
-        elif session is not None:
-            cls._session_provider = lambda: session
-        else:
+        if session_provider is None:
             raise ValueError(
-                "session_provider is required (or pass session to be wrapped)."
+                "session_provider is required for CRUD.configure; "
+                "pass a callable that returns an active Session."
             )
 
-        if query_factory is not None:
-            cls._query_factory = query_factory
+        cls._session_provider = session_provider
 
-        if error_logger is not None:
-            cls._logger = error_logger
+        if query_builder is not None:
+            cls._query_builder = query_builder
+
+        if logger is not None:
+            cls._logger = logger
         if error_policy is not None:
             cls._default_error_policy = error_policy
 
@@ -251,12 +242,12 @@ class CRUD(Generic[ModelTypeVar]):
         provider = self._get_session_provider()
         return cast(SessionLike, provider())
 
-    def _get_query_factory(self) -> QueryFactory:
-        if self._query_factory is not None:
-            return self._query_factory
-        if type(self)._query_factory is not None:
-            return cast(QueryFactory, type(self)._query_factory)
-        return lambda model, session: _default_query_factory(model, session, self)
+    def _get_query_builder(self) -> QueryBuilder:
+        if self._query_builder is not None:
+            return self._query_builder
+        if type(self)._query_builder is not None:
+            return cast(QueryBuilder, type(self)._query_builder)
+        return lambda model, session: _default_query_builder(model, session, self)
 
     def _require_session(self) -> SessionLike:
         if self._session is None:
@@ -272,7 +263,7 @@ class CRUD(Generic[ModelTypeVar]):
         It should only be used inside a ``with CRUD(...)`` context.
         """
         session = self._require_session()
-        return cast(SessionViewType, _SessionView(self, session))
+        return cast(SessionViewType, SessionProxy(self, session))
 
     def config(
         self,
@@ -298,17 +289,17 @@ class CRUD(Generic[ModelTypeVar]):
             self._apply_global_filters = not disable_global_filter
         return self
 
-    def create_instance(self, no_attach: bool = False) -> ModelTypeVar:
+    def create_instance(self, fresh: bool = False) -> ModelTypeVar:
         """Create or return the model instance bound to this CRUD.
 
         Args:
-            no_attach: When ``True``, always return a fresh, unattached model
+            fresh: When ``True``, always return a fresh, unattached model
                 instance instead of caching it on the CRUD object.
         Returns:
             A model instance constructed from the kwargs provided at CRUD
             initialization.
         """
-        if no_attach:
+        if fresh:
             return cast(ModelTypeVar, self._model(**self._kwargs))
         if self.instance is None:
             self.instance = self._model(**self._kwargs)
@@ -341,7 +332,7 @@ class CRUD(Generic[ModelTypeVar]):
             if instance is None:
                 instance = self.create_instance()
 
-            self._ensure_sub_txn()
+            self._ensure_nested_txn()
 
             need_merge = False
             insp = sa_inspect(instance)
@@ -392,7 +383,7 @@ class CRUD(Generic[ModelTypeVar]):
             if not instances:
                 return []
 
-            self._ensure_sub_txn()
+            self._ensure_nested_txn()
 
             managed_instances: list[ModelTypeVar] = []
             for instance in instances:
@@ -446,7 +437,7 @@ class CRUD(Generic[ModelTypeVar]):
             A ``CRUDQuery`` wrapping the underlying SQLAlchemy ``Query``.
         """
         session = self._require_session()
-        base_query = self._get_query_factory()(self._model, session)
+        base_query = self._get_query_builder()(self._model, session)
         query = cast(
             Query, base_query.query if isinstance(base_query, CRUDQuery) else base_query
         )
@@ -527,7 +518,7 @@ class CRUD(Generic[ModelTypeVar]):
             if not instance:
                 return None
 
-            self._ensure_sub_txn()
+            self._ensure_nested_txn()
             session = self._require_session()
             no_autoflush_cm = session.no_autoflush
             assert no_autoflush_cm is not None
@@ -570,7 +561,7 @@ class CRUD(Generic[ModelTypeVar]):
         try:
             session = self._require_session()
             if instance:
-                self._ensure_sub_txn()
+                self._ensure_nested_txn()
                 session.delete(instance)
             else:
                 if query is None:
@@ -581,7 +572,7 @@ class CRUD(Generic[ModelTypeVar]):
                     self.status = SQLStatus.NOT_FOUND
                     return False
 
-                self._ensure_sub_txn()
+                self._ensure_nested_txn()
                 if all_records:
                     query.delete(synchronize_session=sync)
                 else:
@@ -597,14 +588,14 @@ class CRUD(Generic[ModelTypeVar]):
             self.status = SQLStatus.INTERNAL_ERR
         return False
 
-    def need_commit(self) -> None:
+    def mark_for_commit(self) -> None:
         """Mark the current context as needing commit on exit.
 
         This is useful when changes are made through other means (for example
         via ``crud.session``) and you still want the CRUD context manager to
         commit when leaving the ``with`` block.
         """
-        self._ensure_sub_txn()
+        self._ensure_nested_txn()
         self._need_commit = True
         self._mark_dirty()
 
@@ -617,8 +608,8 @@ class CRUD(Generic[ModelTypeVar]):
         """
         try:
             session = self._require_session()
-            if self._sub_txn and getattr(self._sub_txn, "is_active", False):
-                self._sub_txn.commit()
+            if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+                self._nested_txn.commit()
             else:
                 session.commit()
             self._explicit_committed = True
@@ -637,8 +628,8 @@ class CRUD(Generic[ModelTypeVar]):
         """
         try:
             session = self._require_session()
-            if self._sub_txn and getattr(self._sub_txn, "is_active", False):
-                self._sub_txn.rollback()
+            if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+                self._nested_txn.rollback()
             else:
                 session.rollback()
         finally:
@@ -680,17 +671,17 @@ class CRUD(Generic[ModelTypeVar]):
                         exc_type,
                         exc_val,
                     )
-                if self._sub_txn and getattr(self._sub_txn, "is_active", False):
+                if self._nested_txn and getattr(self._nested_txn, "is_active", False):
                     try:
-                        self._sub_txn.rollback()
+                        self._nested_txn.rollback()
                     except Exception:
                         # Log and continue to top-level rollback handling.
                         self._logger("CRUD sub-txn rollback failed", exc_info=True)
                 self._need_commit = False
             elif self._need_commit and not self._explicit_committed:
                 try:
-                    if self._sub_txn and getattr(self._sub_txn, "is_active", False):
-                        self._sub_txn.commit()
+                    if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+                        self._nested_txn.commit()
                 except Exception as exc:
                     self._logger("CRUD sub-txn commit failed: %s", exc)
                     raise
@@ -700,7 +691,7 @@ class CRUD(Generic[ModelTypeVar]):
             if self._session is not None:
                 session = self._session
                 state = _get_txn_state(session)
-                joined_existing = getattr(self, "_joined_txn", False)
+                joined_existing = getattr(self, "_joined_existing", False)
 
                 if state is not None and state.active:
                     state.depth -= 1
@@ -727,14 +718,14 @@ class CRUD(Generic[ModelTypeVar]):
             # Session lifecycle is owned by the outer application/framework.
             self._session = None
 
-    def _ensure_sub_txn(self) -> None:
+    def _ensure_nested_txn(self) -> None:
         """Ensure there is an active SAVEPOINT / nested transaction if possible."""
-        if not (self._sub_txn and self._sub_txn.is_active):
+        if not (self._nested_txn and self._nested_txn.is_active):
             try:
                 session = self._require_session()
-                self._sub_txn = session.begin_nested()
+                self._nested_txn = session.begin_nested()
             except Exception:
-                self._sub_txn = None
+                self._nested_txn = None
 
     def _mark_dirty(self) -> None:
         # The current transaction join/depth is managed by the shared
@@ -747,8 +738,8 @@ class CRUD(Generic[ModelTypeVar]):
         self.status = SQLStatus.SQL_ERR
         try:
             session = self._require_session()
-            if self._sub_txn and getattr(self._sub_txn, "is_active", False):
-                self._sub_txn.rollback()
+            if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+                self._nested_txn.rollback()
             else:
                 session.rollback()
         except Exception:
@@ -756,7 +747,7 @@ class CRUD(Generic[ModelTypeVar]):
         self._need_commit = False
         # Only re-raise SQLAlchemy errors when ``error_policy == "raise"``;
         # the transaction decorator or caller will handle the exception.
-        if self._resolve_error_policy() == "raise":
+        if self.resolve_error_policy() == "raise":
             raise e
 
     @classmethod
@@ -764,7 +755,7 @@ class CRUD(Generic[ModelTypeVar]):
         cls,
         *,
         error_policy: ErrorPolicy | None = None,
-        join: bool = True,
+        join_existing: bool = True,
         # nested: bool | None = None,
     ) -> TransactionDecorator[P, R]:
         """Function-level transaction decorator.
@@ -784,7 +775,7 @@ class CRUD(Generic[ModelTypeVar]):
 
         return _txn_transaction(
             session_factory,
-            join=join,
+            join_existing=join_existing,
             # nested=nested,
             error_policy=resolved_policy,
         )
