@@ -49,7 +49,7 @@ def test_without_configure_is_assert_error() -> None:
 def test_outside_app_context_raises_runtime_error() -> None:
     """Using Flask-SQLAlchemy session without app context should raise RuntimeError."""
     app, db, User = _init_db()
-    CRUD.configure(session=db.session)
+    CRUD.configure(session_provider=lambda: db.session)
     # 缺失 app_context，直接使用 CRUD 应抛出 RuntimeError
     with CRUD(User) as crud:  # noqa: F841 - 故意触发
         crud.add(email="outside@example.com")
@@ -62,7 +62,7 @@ def test_missing_table_causes_operational_error() -> None:
     """Running CRUD against a missing table should surface OperationalError (misconfigured DB)."""
     app, db, User = _init_db(create_tables=False)
     with app.app_context():
-        CRUD.configure(session=db.session, error_policy="raise")
+        CRUD.configure(session_provider=lambda: db.session, error_policy="raise")
         with CRUD(User) as crud:
             crud.add(email="table-missing@example.com")
 
@@ -72,7 +72,7 @@ def test_manual_transaction_conflicts_with_crud() -> None:
     """External manual begin plus CRUD-managed transaction should conflict (double begin)."""
     app, db, User = _init_db()
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
         txn = db.session.begin()
         try:
             with CRUD(User) as crud:  # noqa: F841 - 故意触发

@@ -35,7 +35,7 @@ def test_crud_add_query_update_delete(app_and_db) -> None:
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session, error_policy="raise")
+        CRUD.configure(session_provider=lambda: db.session, error_policy="raise")
 
         email = "user@example.com"
 
@@ -72,7 +72,7 @@ def test_crud_transaction_decorator_join(app_and_db) -> None:
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session, error_policy="raise")
+        CRUD.configure(session_provider=lambda: db.session, error_policy="raise")
 
         @CRUD.transaction()
         def create_two_users() -> None:
@@ -93,10 +93,10 @@ def test_on_sql_error_respects_error_policy(app_and_db) -> None:
     app, db, User, _Profile = app_and_db
 
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
 
         # status 策略：不抛出异常，只设置状态
-        crud_status = CRUD(User).config(error_policy="status")
+        crud_status = CRUD(User).config(error_policy="status_only")
         crud_status._on_sql_error(SQLAlchemyError("test"))  # type: ignore[attr-defined]  # noqa: SLF001
         assert crud_status.status == SQLStatus.SQL_ERR
 
@@ -112,7 +112,7 @@ def test_transaction_rollback_on_runtime_exception(app_and_db) -> None:
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
 
         @CRUD.transaction()
         def create_then_fail() -> None:
@@ -132,7 +132,7 @@ def test_nested_transaction_join_and_rollback(app_and_db) -> None:
     _cleanup_multi(app, db, User, Profile)
 
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
 
         @CRUD.transaction()
         def inner_create(email: str) -> None:
@@ -155,17 +155,17 @@ def test_nested_transaction_join_and_rollback(app_and_db) -> None:
 
 
 def test_status_policy_rolls_back_without_raising(app_and_db) -> None:
-    """With error_policy='status' SQLAlchemyError should be rolled back but not raised."""
+    """With error_policy='status_only' SQLAlchemyError should be rolled back but not raised."""
 
     app, db, User, Profile = app_and_db
     _cleanup_multi(app, db, User, Profile)
 
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
 
-        @CRUD.transaction(error_policy="status")
+        @CRUD.transaction(error_policy="status_only")
         def create_then_force_sql_error() -> None:
-            with CRUD(User).config(error_policy="status") as crud:
+            with CRUD(User).config(error_policy="status_only") as crud:
                 crud.add(email="status@example.com")
                 # 模拟一次 SQLAlchemyError，以触发 _on_sql_error 中的回滚逻辑
                 crud._on_sql_error(SQLAlchemyError("forced"))  # type: ignore[attr-defined]  # noqa: SLF001
@@ -183,7 +183,7 @@ def test_discard_rolls_back_partial_operations(app_and_db) -> None:
     _cleanup_multi(app, db, User, Profile)
 
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
 
         @CRUD.transaction()
         def mixed_ops() -> None:
@@ -212,7 +212,7 @@ def test_query_count_order_by_group_by(app_and_db) -> None:
     _cleanup_multi(app, db, User, Profile)
 
     with app.app_context():
-        CRUD.configure(session=db.session, error_policy="raise")
+        CRUD.configure(session_provider=lambda: db.session, error_policy="raise")
 
         emails = [
             "alpha@example.com",
@@ -256,7 +256,7 @@ def test_add_many_and_global_filters(app_and_db) -> None:
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session, error_policy="raise")
+        CRUD.configure(session_provider=lambda: db.session, error_policy="raise")
 
         # add_many：应批量插入并返回带主键的实例列表
         first = User(email="first@example.com")
@@ -291,16 +291,16 @@ def test_add_many_and_global_filters(app_and_db) -> None:
 
 
 def test_create_instance_and_explicit_commit(app_and_db) -> None:
-    """Cover create_instance(no_attach) and explicit commit path."""
+    """Cover create_instance(fresh) and explicit commit path."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session, error_policy="raise")
+        CRUD.configure(session_provider=lambda: db.session, error_policy="raise")
 
-        # create_instance(no_attach) 不应绑定 CRUD 实例或 Session
+        # create_instance(fresh) 不应绑定 CRUD 实例或 Session
         crud_tmp = CRUD(User)
-        detached = crud_tmp.create_instance(no_attach=True)
+        detached = crud_tmp.create_instance(fresh=True)
         assert crud_tmp.instance is None
         assert detached.id is None
         assert object_session(detached) is None
@@ -322,7 +322,7 @@ def test_pure_query_and_all_records_delete(app_and_db) -> None:
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
         emails = ["keep@example.com", "drop@example.com"]
         for email in emails:
             with CRUD(User) as crud:
@@ -351,38 +351,38 @@ def test_pure_query_and_all_records_delete(app_and_db) -> None:
         assert db.session.query(User).count() == 0
 
 
-def test_need_commit_marks_dirty_without_mutation(app_and_db) -> None:
-    """need_commit() should cause commit on exit even without further mutations."""
+def test_mark_for_commit_marks_dirty_without_mutation(app_and_db) -> None:
+    """mark_for_commit() should cause commit on exit even without further mutations."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
 
         with CRUD(User) as crud:
             user = crud.add(email="need-commit@example.com")
             assert user is not None
-            crud.need_commit()
+            crud.mark_for_commit()
 
         assert db.session.query(User).count() == 1
 
 
 def test_error_policy_inherits_from_transaction_decorator(app_and_db) -> None:
-    """error_policy from transaction decorator should be visible to CRUD._resolve_error_policy."""
+    """error_policy from transaction decorator should be visible to CRUD.resolve_error_policy."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session, error_policy="raise")
+        CRUD.configure(session_provider=lambda: db.session, error_policy="raise")
 
         # 先插入一条记录，后续重复插入触发唯一约束
         with CRUD(User) as crud:
             crud.add(email="dup@example.com")
 
-        @CRUD.transaction(error_policy="status")
+        @CRUD.transaction(error_policy="status_only")
         def create_duplicate() -> None:
             with CRUD(User) as crud_dup:
-                # 触发唯一约束导致 SQLAlchemyError，但 error_policy=status 不应向外抛出
+                # 触发唯一约束导致 SQLAlchemyError，但 error_policy=status_only 不应向外抛出
                 crud_dup.add(email="dup@example.com")
 
         create_duplicate()
@@ -396,7 +396,7 @@ def test_crud_conflicts_with_external_manual_transaction(app_and_db) -> None:
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
         txn = db.session.begin()
         try:
             with pytest.raises(InvalidRequestError):
@@ -416,7 +416,7 @@ def test_transaction_decorator_conflicts_with_external_manual_transaction(
     _cleanup_all(app, db, User)
 
     with app.app_context():
-        CRUD.configure(session=db.session)
+        CRUD.configure(session_provider=lambda: db.session)
         txn = db.session.begin()
         try:
 

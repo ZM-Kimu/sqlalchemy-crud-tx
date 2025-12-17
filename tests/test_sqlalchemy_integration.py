@@ -90,7 +90,7 @@ def test_pure_sqlalchemy_transaction_join(sa_session: Session) -> None:
 def test_session_view_commit_and_rollback_redirect(sa_session: Session) -> None:
     """Session view should allow advanced operations but redirect commit/rollback to CRUD."""
 
-    CRUD.configure(session=sa_session)
+    CRUD.configure(session_provider=lambda: sa_session)
 
     # 测试 commit 重定向
     with CRUD(SAUser) as crud:
