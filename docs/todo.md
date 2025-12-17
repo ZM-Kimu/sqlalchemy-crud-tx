@@ -73,11 +73,11 @@
   - `SessionProvider = Callable[[], SessionLike]`，只能通过 provider 获取 Session，未配置 `_session_provider` 即在首次使用时抛 `RuntimeError`（强制要求 `CRUD.configure(session_provider=...)`）。  
   - 弃用类属性 `session` 等旧入口，视为 BREAKING CHANGE。
 - Query 统一：  
-  - `QueryFactory = Callable[[type[TModel], SessionLike], CRUDQuery[TModel, TRow]]`，查询与事务共用同一 Session。  
+  - `QueryBuilder = Callable[[type[TModel], SessionLike], CRUDQuery[TModel, TRow]]`，查询与事务共用同一 Session。  
   - 默认从 SQLAlchemy Session 构造，不再依赖 Flask-SQLAlchemy 的 `model.query` 作为主线。
 - `CRUD.configure` 规范（BREAKING）：  
-  - 仅接受 `session_provider`（或显式 `session` 立刻封装为 provider）；旧的直接挂载类属性方案视为废弃并移除兼容期。  
-  - `query_factory` 可选覆盖；内部归一化为类级 `_session_provider` / `_query_factory`；未配置则报错并有测试。
+  - 仅接受 callable 形式的 `session_provider`，移除直接传 `session` 的快捷参数。  
+  - `query_builder` 可选覆盖；内部归一化为类级 `_session_provider` / `_query_builder`；未配置则报错并有测试。
 
 - 类型约束与基线：
   - 使用最小 `ORMModel` 协议作为 `TModel` 上界，移除对 `flask_sqlalchemy.model.Model` 的硬依赖（BREAKING）。
@@ -86,8 +86,8 @@
 ### 3.2 适配层与用法（Flask 作为可选 glue，而非主线）
 
 - 核心库仅依赖 SQLAlchemy；Flask 相关作为可选 glue，不是主线。
-- Flask 集成放在独立模块（如 `flask_integration.py`）中：
-  - 提供 `configure_flask(db)` 等封装，内部通过 `db.session` + 默认 `QueryFactory` 调用 `CRUD.configure`。
+- Flask 集成放在独立模块（如 `flask_integration.py`）中：  
+  - 提供 `configure_flask(db)` 等封装，内部通过 `db.session` + 默认 `QueryBuilder` 调用 `CRUD.configure`。
   - 该模块中才导入 Flask/Flask-SQLAlchemy，核心模块不直接导入。
 - `pyproject.toml` 中通过 extras 管理 Flask 依赖：
 
@@ -97,7 +97,7 @@
   ```
 
 - 文档提供两套 quickstart：
-  - 主线：纯 SQLAlchemy（`sessionmaker` + 默认 `query_factory`）。
+  - 主线：纯 SQLAlchemy（`sessionmaker` + 默认 `query_builder`）。
   - 可选：Flask 集成示例（`configure_flask(db)`）。
 
 ### 3.3 事务与行为（行为语义固定）
@@ -131,15 +131,15 @@
   - 给出旧版 vs 新版的对比代码片段，强调从“Flask-first”迁移到“SQLAlchemy-first”的设计变化。
 - 迁移说明 / CHANGELOG：
   - `configure` 签名变化；
-  - SessionProvider / QueryFactory 的默认行为；
+  - SessionProvider / QueryBuilder 的默认行为；
   - 依赖拆分（核心、extras）。
 - 对外 API 稳定性：
   - 通过 `flask_sqlalchemy_crud.__all__` 固定公共导出（`CRUD`、`CRUDQuery`、`configure_flask` 等），内部模块结构可自由演进。
 
 ### 3.6 实施顺序（建议）
 
-1) 落地 `_session_provider` / `_query_factory` 接口归一，保持现有行为通过测试。  
-2) 完善默认 `QueryFactory`，确保 CRUD / query / transaction 共享 Session；调整类型定义。  
+1) 落地 `_session_provider` / `_query_builder` 接口归一，保持现有行为通过测试。  
+2) 完善默认 `QueryBuilder`，确保 CRUD / query / transaction 共享 Session；调整类型定义。  
 3) 补充纯 SQLAlchemy 测试与示例，修正代码通过测试。  
 4) 添加 Flask 适配模块与文档更新（可选路径）。  
 5) 更新迁移文档、依赖声明与 CI/类型检查配置。  
@@ -171,3 +171,5 @@
 
 
 - 计划外但保留：`transaction(..., nested=...)` 参数目前仅作为未来嵌套事务 / SAVEPOINT 语义的占位符存在，暂不实现具体行为，后续单独设计与实现。
+
+---

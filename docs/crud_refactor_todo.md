@@ -7,7 +7,7 @@
 
 - [ ] 考虑适配层（未做，视需求决定是否新增）：
   - [ ] 如有需要，单独建立 `flask_integration.py` 处理与 `has_request_context` / `g` 的交互。
-  - [ ] 对外仍保持简单的 `CRUD.configure(session=..., error_logger=...)` 接口。
+  - [ ] 对外仍保持简单的 `CRUD.configure(session_provider=..., logger=...)` 接口。
 
 ## 5. 渐进迁移与兼容性（P1）
 

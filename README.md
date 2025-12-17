@@ -2,10 +2,10 @@
 
 English | [中文](README_zh.md)
 
-A lightweight CRUD + transaction helper for Flask-SQLAlchemy:
+A lightweight CRUD + transaction helper for SQLAlchemy (Flask glue can be added via extensions):
 - Context-managed CRUD with nested savepoints: `with CRUD(Model) as crud:`
 - Function-level transactions via `@CRUD.transaction()` with join semantics
-- Configurable error policy (`error_policy="raise"|"status"`) and pluggable logger
+- Configurable error policy (`error_policy="raise"|"status_only"`) and pluggable logger
 - Type-friendly `CRUDQuery` wrapper for common chainable operations
 
 ## Install
@@ -16,41 +16,40 @@ pip install flask-sqlalchemy-crud
 pip install -e .
 ```
 
-Requires Python 3.10+ with `flask-sqlalchemy>=3.0` and `sqlalchemy>=1.4` (pip will install these automatically).
+Requires Python 3.11+ with `sqlalchemy>=1.4` (optional Flask integration can be added separately).
 
-## Quick Start
+## Quick Start (pure SQLAlchemy)
 
 ```python
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import String, Integer, create_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from flask_sqlalchemy_crud import CRUD
 
-app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///./crud_example.db"
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
-db = SQLAlchemy(app)
+engine = create_engine("sqlite:///./crud_example.db", echo=False)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
-class User(db.Model):
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
     __tablename__ = "example_user"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    email: Mapped[str] = mapped_column(db.String(255), unique=True, nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
 
 
-with app.app_context():
-    db.drop_all()
-    db.create_all()
+Base.metadata.drop_all(engine)
+Base.metadata.create_all(engine)
 
-    CRUD.configure(session=db.session, error_policy="raise")
+CRUD.configure(session_provider=SessionLocal, error_policy="raise")
 
-    with CRUD(User) as crud:
-        user = crud.add(email="demo@example.com")
-        print("created", user)
+with CRUD(User) as crud:
+    user = crud.add(email="demo@example.com")
+    print("created", user)
 
-    with CRUD(User, email="demo@example.com") as crud:
-        print("fetched", crud.first())
+with CRUD(User, email="demo@example.com") as crud:
+    print("fetched", crud.first())
 ```
 
 ## Function-Level Transactions
@@ -58,21 +57,20 @@ with app.app_context():
 ```python
 from flask_sqlalchemy_crud import CRUD
 
-with app.app_context():
-    CRUD.configure(session=db.session, error_policy="raise")
+CRUD.configure(session_provider=SessionLocal, error_policy="raise")
 
-    @CRUD.transaction(error_policy="raise")
-    def create_two_users():
-        with CRUD(User) as crud1:
-            crud1.add(email="a@example.com")
-        with CRUD(User) as crud2:
-            crud2.add(email="b@example.com")
+@CRUD.transaction(error_policy="raise")
+def create_two_users():
+    with CRUD(User) as crud1:
+        crud1.add(email="a@example.com")
+    with CRUD(User) as crud2:
+        crud2.add(email="b@example.com")
 
-    create_two_users()
+create_two_users()
 ```
 
 - The outermost call commits or rolls back; inner CRUD contexts only mark status when exceptions occur.
-- With `error_policy="status"`, SQLAlchemyError is rolled back and catched; check `crud.status` / `crud.error` instead.
+- With `error_policy="status_only"`, SQLAlchemyError is rolled back and caught; check `crud.status` / `crud.error` instead.
 
 ## Docs & Examples
 
@@ -90,5 +88,5 @@ with app.app_context():
 
 ## Notes
 
-- Tightly coupled to Flask-SQLAlchemy; pure SQLAlchemy usage is not yet supported.
-- Always call `CRUD.configure(session=...)` before using CRUD instances.
+- SQLAlchemy-first; optional Flask integration can be layered via extensions.
+- Always call `CRUD.configure(session_provider=...)` before using CRUD instances.
