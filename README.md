@@ -1,4 +1,4 @@
-# flask-sqlalchemy-crud
+# sqlalchemy-crud-tx
 
 English | [中文](README_zh.md)
 
@@ -11,8 +11,10 @@ A lightweight CRUD + transaction helper for SQLAlchemy (Flask glue can be added 
 ## Install
 
 ```bash
-pip install flask-sqlalchemy-crud
-# or
+pip install sqlalchemy-crud-tx
+# with Flask integration
+pip install "sqlalchemy-crud-tx[flask]"
+# or local editable install
 pip install -e .
 ```
 
@@ -23,7 +25,7 @@ Requires Python 3.11+ with `sqlalchemy>=1.4` (optional Flask integration can be 
 ```python
 from sqlalchemy import String, Integer, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
-from flask_sqlalchemy_crud import CRUD
+from sqlalchemy_crud_tx import CRUD
 
 engine = create_engine("sqlite:///./crud_example.db", echo=False)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
@@ -49,13 +51,20 @@ with CRUD(User) as crud:
     print("created", user)
 
 with CRUD(User, email="demo@example.com") as crud:
-    print("fetched", crud.first())
+    row = crud.first()
+    print("fetched", row)
+
+with CRUD(User) as crud:
+    crud.delete(row)
+# or
+with CRUD(User, email="demo@example.com") as crud:
+    crud.delete()
 ```
 
 ## Function-Level Transactions
 
 ```python
-from flask_sqlalchemy_crud import CRUD
+from sqlalchemy_crud_tx import CRUD
 
 CRUD.configure(session_provider=SessionLocal, error_policy="raise")
 

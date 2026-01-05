@@ -1,4 +1,4 @@
-# flask_sqlalchemy_crud TODO 列表
+# sqlalchemy_crud_tx TODO 列表
 
 > 作用：记录后续可以迭代的“高级玩法”与设计方向，避免在核心代码中堆积过多注释。  
 > 粗分为：**当前重构主线（3）** + **类型/事务增强（1/2）** + **工程化收尾（文档/测试）。**
@@ -134,7 +134,7 @@
   - SessionProvider / QueryBuilder 的默认行为；
   - 依赖拆分（核心、extras）。
 - 对外 API 稳定性：
-  - 通过 `flask_sqlalchemy_crud.__all__` 固定公共导出（`CRUD`、`CRUDQuery`、`configure_flask` 等），内部模块结构可自由演进。
+  - 通过 `sqlalchemy_crud_tx.__all__` 固定公共导出（`CRUD`、`CRUDQuery`、`configure_flask` 等），内部模块结构可自由演进。
 
 ### 3.6 实施顺序（建议）
 

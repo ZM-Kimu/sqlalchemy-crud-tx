@@ -1,29 +1,26 @@
-# flask-sqlalchemy-crud
+# sqlalchemy-crud-tx
 
 一个面向 SQLAlchemy 的轻量级 CRUD/事务辅助库（Flask glue 可通过扩展方式接入）：
 - `with CRUD(Model) as crud:` 提供上下文式 CRUD 与子事务
 - `@CRUD.transaction()` 支持 join 语义的函数级事务
-- `error_policy="raise"|"status_only"` 可选错误策略，日志接口可自定义
 - 类型友好的 `CRUDQuery` 链式查询包装
-
-> 仓库仍在重构阶段，API 可能会有改动。
 
 ## 安装
 
 ```bash
-pip install flask-sqlalchemy-crud
+pip install sqlalchemy-crud-tx
+# 如需 Flask 集成
+pip install "sqlalchemy-crud-tx[flask]"
 # 或
 pip install -e .
 ```
-
-需要 Python 3.11+，依赖 `sqlalchemy>=1.4`（Flask 相关可按需自行安装）。
 
 ## 快速开始（纯 SQLAlchemy）
 
 ```python
 from sqlalchemy import String, Integer, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
-from flask_sqlalchemy_crud import CRUD
+from sqlalchemy_crud_tx import CRUD
 
 engine = create_engine("sqlite:///./crud_example.db", echo=False)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
@@ -33,7 +30,7 @@ class Base(DeclarativeBase):
     pass
 
 
-class User(Base):  # type: ignore[misc]
+class User(Base):
     __tablename__ = "example_user"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
@@ -49,13 +46,20 @@ with CRUD(User) as crud:
     print("created", user)
 
 with CRUD(User, email="demo@example.com") as crud:
-    print("fetched", crud.first())
+    row = crud.first()
+    print("fetched", row)
+
+with CRUD(User) as d:
+    d.delete(row)
+# or 
+with CRUD(User, email="demo@example.com") as d:
+    d.delete()
 ```
 
 ## 函数级事务示例
 
 ```python
-from flask_sqlalchemy_crud import CRUD
+from sqlalchemy_crud_tx import CRUD
 
 CRUD.configure(session_provider=SessionLocal, error_policy="raise")
 

@@ -15,6 +15,7 @@ ModelTypeVar = TypeVar("ModelTypeVar", bound=ORMModel)
 ResultTypeVar_co = TypeVar("ResultTypeVar_co", covariant=True)
 
 _E = TypeVar("_E")
+_SENTINEL = object()
 
 
 class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar_co]):
@@ -72,16 +73,21 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar_co]):
 
     @overload
     def with_entities(
-        self, *entities: Any
+        self, entity: Any, entity2: Any, *entities: Any
     ) -> "CRUDQuery[ModelTypeVar, tuple[Any, ...]]": ...
 
-    def with_entities(self, *entities: Any) -> "CRUDQuery[ModelTypeVar, Any]":
-        """Change the selected entities.
+    def with_entities(
+        self, entity: Any, entity2: Any = _SENTINEL, *entities: Any
+    ) -> "CRUDQuery[ModelTypeVar, Any]":
+        """Change the selected entities (requires at least one entity).
 
         - Single entity: ``CRUDQuery[Model, E]``.
         - Multiple entities: ``CRUDQuery[Model, tuple[Any, ...]]``.
         """
-        new_query = self._query.with_entities(*entities)
+        if entity2 is _SENTINEL:
+            new_query = self._query.with_entities(entity)
+        else:
+            new_query = self._query.with_entities(entity, entity2, *entities)
         return CRUDQuery(self._crud, new_query)
 
     def order_by(self, *clauses) -> "CRUDQuery[ModelTypeVar, ResultTypeVar_co]":

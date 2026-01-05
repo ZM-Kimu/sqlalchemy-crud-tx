@@ -16,7 +16,7 @@ from typing import (
 
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Query, object_session
+from sqlalchemy.orm import Query, SessionTransaction, object_session
 from sqlalchemy.sql import _orm_types
 
 from .query import CRUDQuery
@@ -137,7 +137,7 @@ class CRUD(Generic[ModelTypeVar]):
         self._apply_global_filters = True
         self._txn_state: _TxnState | None = None
         self._joined_existing = False
-        self._nested_txn = None
+        self._nested_txn: SessionTransaction | None = None
         self._explicit_committed = False
         self._discarded = False
         self._session: SessionLike | None = None
@@ -335,7 +335,7 @@ class CRUD(Generic[ModelTypeVar]):
             self._ensure_nested_txn()
 
             need_merge = False
-            insp = sa_inspect(instance)
+            insp = cast(Any, sa_inspect(instance))
             bound_sess = object_session(instance)
             need_merge = (not insp.transient) or (
                 bound_sess is not None and bound_sess is not self._session
@@ -388,7 +388,7 @@ class CRUD(Generic[ModelTypeVar]):
             managed_instances: list[ModelTypeVar] = []
             for instance in instances:
                 need_merge = False
-                insp = sa_inspect(instance)
+                insp = cast(Any, sa_inspect(instance))
                 bound_sess = object_session(instance)
                 need_merge = (not insp.transient) or (
                     bound_sess is not None and bound_sess is not self._session
@@ -680,7 +680,9 @@ class CRUD(Generic[ModelTypeVar]):
                 self._need_commit = False
             elif self._need_commit and not self._explicit_committed:
                 try:
-                    if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+                    if self._nested_txn and getattr(
+                        self._nested_txn, "is_active", False
+                    ):
                         self._nested_txn.commit()
                 except Exception as exc:
                     self._logger("CRUD sub-txn commit failed: %s", exc)

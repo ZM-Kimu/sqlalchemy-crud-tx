@@ -7,8 +7,6 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import MappedColumn, mapped_column
 
-from flask_sqlalchemy_crud import CRUD, SQLStatus  # noqa: E402
-
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
 
 

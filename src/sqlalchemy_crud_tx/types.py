@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Protocol,
+    TypeAlias,
+    TypeVar,
+    runtime_checkable,
+)
 
 from sqlalchemy.orm import Session as _Session
 from sqlalchemy.orm import scoped_session as _ScopedSession
@@ -20,7 +28,7 @@ class ORMModel(Protocol):
     declarative models without importing their concrete base classes.
     """
 
-    __table__: Any
+    __table__: ClassVar[Any]
 
 
 ModelTypeVar = TypeVar("ModelTypeVar", bound=ORMModel)

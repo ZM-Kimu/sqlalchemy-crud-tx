@@ -13,7 +13,7 @@ if str(SRC_DIR) not in sys.path:
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from flask_sqlalchemy_crud import CRUD, SQLStatus  # noqa: E402
+from sqlalchemy_crud_tx import CRUD, SQLStatus
 
 
 def _cleanup_all(app, db, model) -> None:

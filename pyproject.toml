@@ -3,17 +3,20 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "flask-sqlalchemy-crud"
-version = "0.1.0"
+name = "sqlalchemy-crud-tx"
+version = "0.2.0"
 description = "Use SQLAlchemy in a Pythonic way."
 readme = "README.md"
 authors = [{ name = "ZMKimu" }]
 license = { text = "MIT" }
 requires-python = ">=3.11"
-dependencies = ["flask-sqlalchemy>=3.0", "sqlalchemy>=1.4"]
+dependencies = ["sqlalchemy>=1.4"]
 
 [project.urls]
-Homepage = "https://github.com/ZM-Kimu/flask_sqlalchemy_crud"
+Homepage = "https://github.com/ZM-Kimu/sqlalchemy-crud-tx"
+
+[project.optional-dependencies]
+flask = ["flask>=2.3", "flask-sqlalchemy>=3.1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

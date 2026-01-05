@@ -1,4 +1,4 @@
-"""Public entry points for the flask_sqlalchemy_crud package."""
+"""Public entry points for the sqlalchemy_crud_tx package."""
 
 from .core import CRUD, CRUDQuery, ErrorLogger, SQLStatus
 
