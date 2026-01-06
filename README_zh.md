@@ -94,3 +94,6 @@ create_two_users()
 
 - 主线支持纯 SQLAlchemy；Flask 相关可通过扩展方式集成。
 - 使用前请先调用 `CRUD.configure(session_provider=...)` 配置会话。
+- 如果 Session 可能已处于事务中（例如 `expire_on_commit` 触发 AUTOBEGIN），
+  可通过 `CRUD.configure(existing_txn_policy=...)` 配置处理策略
+  （`error`、`join`、`savepoint`、`adopt_autobegin`、`reset`）。

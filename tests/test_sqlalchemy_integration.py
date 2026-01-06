@@ -112,3 +112,31 @@ def test_session_view_commit_and_rollback_redirect(sa_session: Session) -> None:
     emails = {u.email for u in sa_session.query(SAUser).all()}
     assert "view-commit@example.com" in emails
     assert "view-rollback@example.com" not in emails
+
+
+def test_existing_txn_policy_adopt_autobegin() -> None:
+    """CRUD should tolerate AUTOBEGIN transactions when policy allows adoption."""
+    engine = create_engine("sqlite:///:memory:", echo=False, future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=True)
+    session = SessionLocal()
+    try:
+        CRUD.configure(
+            session_provider=lambda: session,
+            existing_txn_policy="adopt_autobegin",
+        )
+
+        with CRUD(SAUser) as crud:
+            user = crud.add(email="autobegin@example.com")
+            assert user is not None
+
+        # Access after commit triggers an AUTOBEGIN transaction.
+        _ = user.email
+        assert session.in_transaction()
+
+        with CRUD(SAUser) as crud:
+            found = crud.first()
+            assert found is not None
+    finally:
+        session.close()
+        engine.dispose()

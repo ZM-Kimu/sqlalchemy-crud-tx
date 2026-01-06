@@ -99,3 +99,7 @@ create_two_users()
 
 - SQLAlchemy-first; optional Flask integration can be layered via extensions.
 - Always call `CRUD.configure(session_provider=...)` before using CRUD instances.
+- If a Session may already be in a transaction (e.g., AUTOBEGIN after
+  `expire_on_commit`), set `existing_txn_policy` in `CRUD.configure(...)`
+  to control how CRUD behaves (`error`, `join`, `savepoint`,
+  `adopt_autobegin`, `reset`).

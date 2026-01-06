@@ -6,6 +6,7 @@ import logging
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     Generic,
     ParamSpec,
     Self,
@@ -23,9 +24,15 @@ from .query import CRUDQuery
 from .status import SQLStatus
 from .transaction import (
     ErrorPolicy,
+    ExistingTxnPolicy,
     TransactionDecorator,
-    _get_or_create_txn_state,
+    _activate_txn_state,
+    _begin_session,
+    _get_txn_origin_name,
     _get_txn_state,
+    _in_transaction,
+    _reset_existing_txn,
+    _raise_existing_txn_error,
     _TxnState,
     get_current_error_policy,
 )
@@ -97,11 +104,12 @@ class CRUD(Generic[ModelTypeVar]):
     - Supports global and per-instance default filter conditions.
     """
 
-    _global_filter_conditions: tuple[list, dict] = ([], {})
-    _session_provider: SessionProvider | None = None
-    _query_builder: QueryBuilder | None = None
-    _default_error_policy: ErrorPolicy = "raise"
-    _logger: ErrorLogger = _DEFAULT_LOGGER
+    _global_filter_conditions: ClassVar[tuple[list, dict]] = ([], {})
+    _session_provider: ClassVar[SessionProvider | None] = None
+    _query_builder: ClassVar[QueryBuilder | None] = None
+    _default_error_policy: ClassVar[ErrorPolicy] = "raise"
+    _existing_txn_policy: ClassVar[ExistingTxnPolicy] = "error"
+    _logger: ClassVar[ErrorLogger] = _DEFAULT_LOGGER
 
     @classmethod
     def register_global_filters(cls, *base_exprs, **base_kwargs) -> None:
@@ -163,16 +171,40 @@ class CRUD(Generic[ModelTypeVar]):
 
         state = _get_txn_state(session)
         joined_existing = bool(state is not None and state.active)
+        in_txn = _in_transaction(session)
+        origin_name = _get_txn_origin_name(session) if in_txn else None
+
+        if joined_existing and not in_txn and state is not None:
+            # Stale internal state; reset so policy can re-evaluate.
+            state.active = False
+            joined_existing = False
 
         if not joined_existing:
-            state = _get_or_create_txn_state(session)
-            state.depth = 0
-            state.active = True
-            try:
-                session.begin()
-            except Exception:
-                state.active = False
-                raise
+            if in_txn:
+                policy = type(self)._existing_txn_policy
+                if policy == "error":
+                    _raise_existing_txn_error(policy=policy, origin=origin_name)
+                if policy == "join":
+                    joined_existing = True
+                elif policy == "savepoint":
+                    joined_existing = True
+                    self._nested_txn = session.begin_nested()
+                elif policy == "adopt_autobegin":
+                    if origin_name != "AUTOBEGIN":
+                        _raise_existing_txn_error(policy=policy, origin=origin_name)
+                elif policy == "reset":
+                    _reset_existing_txn(
+                        session,
+                        policy=policy,
+                        origin=origin_name,
+                    )
+                    in_txn = False
+                else:
+                    raise ValueError(f"Unsupported existing_txn_policy: {policy}")
+
+            state = _activate_txn_state(session)
+            if not (joined_existing or in_txn):
+                _begin_session(session, state)
 
         assert state is not None
         state.depth += 1
@@ -192,6 +224,7 @@ class CRUD(Generic[ModelTypeVar]):
         query_builder: QueryBuilder | None = None,
         logger: ErrorLogger | None = None,
         error_policy: ErrorPolicy | None = None,
+        existing_txn_policy: ExistingTxnPolicy | None = None,
     ) -> None:
         """Configure session provider, query builder, logger and defaults.
 
@@ -210,6 +243,9 @@ class CRUD(Generic[ModelTypeVar]):
             error_policy: Default error policy (``\"raise\"`` or ``\"status\"``)
                 applied when no transaction-scoped policy or per-instance
                 override is present.
+            existing_txn_policy: How to handle sessions that already have an
+                active transaction (``\"error\"``, ``\"join\"``,
+                ``\"savepoint\"``, ``\"adopt_autobegin\"``, ``\"reset\"``).
         Raises:
             ValueError: If ``session_provider`` is not provided.
         """
@@ -228,6 +264,8 @@ class CRUD(Generic[ModelTypeVar]):
             cls._logger = logger
         if error_policy is not None:
             cls._default_error_policy = error_policy
+        if existing_txn_policy is not None:
+            cls._existing_txn_policy = existing_txn_policy
 
     @classmethod
     def _get_session_provider(cls) -> SessionProvider:
@@ -758,6 +796,7 @@ class CRUD(Generic[ModelTypeVar]):
         *,
         error_policy: ErrorPolicy | None = None,
         join_existing: bool = True,
+        existing_txn_policy: ExistingTxnPolicy | None = None,
         # nested: bool | None = None,
     ) -> TransactionDecorator[P, R]:
         """Function-level transaction decorator.
@@ -770,6 +809,11 @@ class CRUD(Generic[ModelTypeVar]):
         resolved_policy: ErrorPolicy = (
             error_policy if error_policy is not None else cls._default_error_policy
         )
+        resolved_existing_txn_policy: ExistingTxnPolicy = (
+            existing_txn_policy
+            if existing_txn_policy is not None
+            else cls._existing_txn_policy
+        )
 
         def session_factory() -> SessionLike:
             provider = cls._get_session_provider()
@@ -780,4 +824,5 @@ class CRUD(Generic[ModelTypeVar]):
             join_existing=join_existing,
             # nested=nested,
             error_policy=resolved_policy,
+            existing_txn_policy=resolved_existing_txn_policy,
         )
