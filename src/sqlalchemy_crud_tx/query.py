@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 from sqlalchemy.orm import Query
 
+from .pagination import PaginationResult, paginate_query
 from .types import ORMModel
 
 if TYPE_CHECKING:
@@ -151,9 +152,24 @@ class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar_co]):
         """Return the row count for the underlying query."""
         return self._query.count()
 
-    def paginate(self, *args, **kwargs):
-        """Delegate to ``Query.paginate`` (Flask-SQLAlchemy style pagination)."""
-        return self._query.paginate(*args, **kwargs)
+    def paginate(
+        self,
+        page: int = 1,
+        per_page: int = 20,
+        *,
+        error_out: bool = False,
+        max_per_page: int | None = None,
+        count: bool = True,
+    ) -> PaginationResult[ResultTypeVar_co]:
+        """Paginate query results with the library's built-in paginator."""
+        return paginate_query(
+            self,
+            page=page,
+            per_page=per_page,
+            error_out=error_out,
+            max_per_page=max_per_page,
+            count=count,
+        )
 
     def raw(self) -> Query:
         """Return the raw underlying SQLAlchemy ``Query`` instance."""

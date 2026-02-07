@@ -31,8 +31,8 @@ from .transaction import (
     _get_txn_origin_name,
     _get_txn_state,
     _in_transaction,
-    _reset_existing_txn,
     _raise_existing_txn_error,
+    _reset_existing_txn,
     _TxnState,
     get_current_error_policy,
 )
@@ -105,7 +105,7 @@ class CRUD(Generic[ModelTypeVar]):
     """
 
     _global_filter_conditions: ClassVar[tuple[list, dict]] = ([], {})
-    _session_provider: ClassVar[SessionProvider | None] = None
+    _session_provider: ClassVar[tuple[SessionProvider] | None] = None
     _query_builder: ClassVar[QueryBuilder | None] = None
     _default_error_policy: ClassVar[ErrorPolicy] = "raise"
     _existing_txn_policy: ClassVar[ExistingTxnPolicy] = "error"
@@ -132,7 +132,6 @@ class CRUD(Generic[ModelTypeVar]):
         self._model = model
         self._kwargs = kwargs
 
-        self.instance: ModelTypeVar | None = None
         self._base_filter_exprs: list = list(self._global_filter_conditions[0])
         self._base_filter_kwargs: dict = dict(self._global_filter_conditions[1])
         self._instance_default_kwargs: dict = dict(kwargs)
@@ -246,6 +245,7 @@ class CRUD(Generic[ModelTypeVar]):
             existing_txn_policy: How to handle sessions that already have an
                 active transaction (``\"error\"``, ``\"join\"``,
                 ``\"savepoint\"``, ``\"adopt_autobegin\"``, ``\"reset\"``).
+                See ``transaction(...)`` docstring for the detailed semantics.
         Raises:
             ValueError: If ``session_provider`` is not provided.
         """
@@ -255,7 +255,7 @@ class CRUD(Generic[ModelTypeVar]):
                 "pass a callable that returns an active Session."
             )
 
-        cls._session_provider = session_provider
+        cls._session_provider = (session_provider,)
 
         if query_builder is not None:
             cls._query_builder = query_builder
@@ -274,7 +274,7 @@ class CRUD(Generic[ModelTypeVar]):
                 "CRUD session is not configured. Please call "
                 "CRUD.configure(session_provider=...) before using CRUD."
             )
-        return cls._session_provider
+        return cls._session_provider[0]
 
     def _get_session(self) -> SessionLike:
         provider = self._get_session_provider()
@@ -282,7 +282,7 @@ class CRUD(Generic[ModelTypeVar]):
 
     def _get_query_builder(self) -> QueryBuilder:
         if self._query_builder is not None:
-            return self._query_builder
+            return cast(QueryBuilder, self._query_builder)
         if type(self)._query_builder is not None:
             return cast(QueryBuilder, type(self)._query_builder)
         return lambda model, session: _default_query_builder(model, session, self)
@@ -327,21 +327,15 @@ class CRUD(Generic[ModelTypeVar]):
             self._apply_global_filters = not disable_global_filter
         return self
 
-    def create_instance(self, fresh: bool = False) -> ModelTypeVar:
-        """Create or return the model instance bound to this CRUD.
+    def create_instance(self, **kwargs: Any) -> ModelTypeVar:
+        """Create a fresh model instance from default and override kwargs.
 
-        Args:
-            fresh: When ``True``, always return a fresh, unattached model
-                instance instead of caching it on the CRUD object.
-        Returns:
-            A model instance constructed from the kwargs provided at CRUD
-            initialization.
+        This method is intentionally stateless: every call returns a new,
+        unattached model instance.
         """
-        if fresh:
-            return cast(ModelTypeVar, self._model(**self._kwargs))
-        if self.instance is None:
-            self.instance = self._model(**self._kwargs)
-        return cast(ModelTypeVar, self.instance)
+        payload = dict(self._kwargs)
+        payload.update(kwargs)
+        return self._model(**payload)
 
     def add(
         self,
@@ -367,27 +361,14 @@ class CRUD(Generic[ModelTypeVar]):
             the configured ``error_policy``.
         """
         try:
-            if instance is None:
-                instance = self.create_instance()
-
+            session = self._require_session()
             self._ensure_nested_txn()
 
-            need_merge = False
-            insp = cast(Any, sa_inspect(instance))
-            bound_sess = object_session(instance)
-            need_merge = (not insp.transient) or (
-                bound_sess is not None and bound_sess is not self._session
-            )
-
-            session = self._require_session()
-            target = (
-                cast(ModelTypeVar, session.merge(instance)) if need_merge else instance
-            )
-
-            if kwargs:
-                updated = self.update(target, **kwargs)
-                if updated is not None:
-                    target = updated
+            if instance is None:
+                target = self.create_instance(**kwargs)
+            else:
+                target = self._merge_if_needed(session, instance)
+                self._apply_updates(session, target, kwargs)
 
             session.add(target)
             session.flush()
@@ -421,31 +402,15 @@ class CRUD(Generic[ModelTypeVar]):
             if not instances:
                 return []
 
+            session = self._require_session()
             self._ensure_nested_txn()
 
             managed_instances: list[ModelTypeVar] = []
             for instance in instances:
-                need_merge = False
-                insp = cast(Any, sa_inspect(instance))
-                bound_sess = object_session(instance)
-                need_merge = (not insp.transient) or (
-                    bound_sess is not None and bound_sess is not self._session
-                )
-
-                session = self._require_session()
-                target = (
-                    cast(ModelTypeVar, session.merge(instance))
-                    if need_merge
-                    else instance
-                )
-                if kwargs:
-                    updated = self.update(target, **kwargs)
-                    if updated is not None:
-                        managed_instances.append(updated)
-                        continue
+                target = self._merge_if_needed(session, instance)
+                self._apply_updates(session, target, kwargs)
                 managed_instances.append(target)
 
-            session = self._require_session()
             session.add_all(managed_instances)
             session.flush()
             self._need_commit = True
@@ -556,16 +521,13 @@ class CRUD(Generic[ModelTypeVar]):
             if not instance:
                 return None
 
-            self._ensure_nested_txn()
             session = self._require_session()
-            no_autoflush_cm = session.no_autoflush
-            assert no_autoflush_cm is not None
-            with no_autoflush_cm:
-                for k, v in kwargs.items():
-                    setattr(instance, k, v)
+            self._ensure_nested_txn()
+            target = self._merge_if_needed(session, instance)
+            self._apply_updates(session, target, kwargs)
             self._need_commit = True
             self._mark_dirty()
-            return instance
+            return target
         except SQLAlchemyError as exc:
             self._on_sql_error(exc)
         except Exception as exc:
@@ -767,6 +729,39 @@ class CRUD(Generic[ModelTypeVar]):
             except Exception:
                 self._nested_txn = None
 
+    def _merge_if_needed(
+        self, session: SessionLike, instance: ModelTypeVar
+    ) -> ModelTypeVar:
+        """Attach an instance to the current Session when necessary."""
+        insp = cast(Any, sa_inspect(instance))
+        bound_sess = object_session(instance)
+        need_merge = (not insp.transient) or (
+            bound_sess is not None and bound_sess is not session
+        )
+        if need_merge:
+            return cast(ModelTypeVar, session.merge(instance))
+        return instance
+
+    def _validate_update_fields(
+        self, instance: ModelTypeVar, updates: dict[str, Any]
+    ) -> None:
+        """Fail fast on unknown attributes to avoid silent no-op writes."""
+        model_type = type(instance)
+        for key in updates:
+            if not hasattr(model_type, key):
+                raise AttributeError(f"{model_type.__name__} has no attribute '{key}'")
+
+    def _apply_updates(
+        self, session: SessionLike, instance: ModelTypeVar, updates: dict[str, Any]
+    ) -> None:
+        """Apply field updates under no_autoflush to avoid premature flushes."""
+        if not updates:
+            return
+        self._validate_update_fields(instance, updates)
+        with session.no_autoflush:
+            for key, value in updates.items():
+                setattr(instance, key, value)
+
     def _mark_dirty(self) -> None:
         # The current transaction join/depth is managed by the shared
         # transaction state machine; this is a placeholder for future hooks.
@@ -804,6 +799,8 @@ class CRUD(Generic[ModelTypeVar]):
         - One function call == one CRUD-related transaction scope.
         - Uses the generic ``transaction(...)`` helper to implement join
           semantics and commit/rollback behaviour.
+        - ``existing_txn_policy`` can override how to handle an already-active
+          transaction for this decorator invocation.
         """
 
         resolved_policy: ErrorPolicy = (

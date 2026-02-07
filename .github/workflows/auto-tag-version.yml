@@ -1,0 +1,56 @@
+name: Auto Tag From Version
+
+on:
+    push:
+        branches:
+            - main
+            - master
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+jobs:
+    tag-from-pyproject:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Read version from pyproject.toml
+              id: version
+              run: |
+                  VERSION=$(python - <<'PY'
+                  import tomllib
+                  with open("pyproject.toml", "rb") as f:
+                      data = tomllib.load(f)
+                  print(data["project"]["version"])
+                  PY
+                  )
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+                  echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+            - name: Check if tag already exists on remote
+              id: exists
+              run: |
+                  TAG="${{ steps.version.outputs.tag }}"
+                  if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+                    echo "exists=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "exists=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Create and push annotated tag
+              if: steps.exists.outputs.exists == 'false'
+              run: |
+                  TAG="${{ steps.version.outputs.tag }}"
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git tag -a "$TAG" -m "txn"
+                  git push origin "$TAG"
+
+            - name: Skip when tag exists
+              if: steps.exists.outputs.exists == 'true'
+              run: echo "Tag ${{ steps.version.outputs.tag }} already exists. Skipping."

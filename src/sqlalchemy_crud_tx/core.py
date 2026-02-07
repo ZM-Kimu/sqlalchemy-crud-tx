@@ -7,6 +7,7 @@ type aliases so that callers can import from a single place.
 from __future__ import annotations
 
 from .crud import CRUD
+from .pagination import PaginationResult
 from .query import CRUDQuery
 from .status import SQLStatus
 from .types import EntityTypeVar, ErrorLogger, ModelTypeVar, ResultTypeVar_co
@@ -14,6 +15,7 @@ from .types import EntityTypeVar, ErrorLogger, ModelTypeVar, ResultTypeVar_co
 __all__ = [
     "CRUD",
     "CRUDQuery",
+    "PaginationResult",
     "SQLStatus",
     "ErrorLogger",
     "ModelTypeVar",

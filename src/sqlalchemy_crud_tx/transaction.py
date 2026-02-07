@@ -248,6 +248,12 @@ def transaction(
       joins an already active transaction according to the ``join_existing`` rules.
     - Default join semantics: if there is an active transaction for the same
       Session, join it and let only the outermost call perform commit/rollback.
+    - existing_txn_policy controls how to handle an already-active transaction:
+        - "error": raise InvalidRequestError (default).
+        - "join": join the existing transaction and skip commit/rollback here.
+        - "savepoint": begin a nested transaction (SAVEPOINT).
+        - "adopt_autobegin": only allow AUTOBEGIN and treat it as owned.
+        - "reset": rollback only if there are no pending changes, then begin.
     - ``error_policy`` only affects ``SQLAlchemyError``:
         - ``"raise"``: rollback and then re-raise the database error;
         - ``"status_only"``: rollback and swallow the database error so

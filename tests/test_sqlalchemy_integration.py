@@ -140,3 +140,125 @@ def test_existing_txn_policy_adopt_autobegin() -> None:
     finally:
         session.close()
         engine.dispose()
+
+
+def test_add_twice_same_crud_inserts_two_rows(sa_session: Session) -> None:
+    """Repeated add() on the same CRUD object should insert new rows."""
+    CRUD.configure(session_provider=lambda: sa_session, error_policy="raise")
+
+    with CRUD(SAUser) as crud:
+        first = crud.add(email="multi-1@example.com")
+        second = crud.add(email="multi-2@example.com")
+        assert first is not None
+        assert second is not None
+        assert first.id != second.id
+        assert first.email == "multi-1@example.com"
+        assert second.email == "multi-2@example.com"
+
+    rows = sa_session.query(SAUser).order_by(SAUser.id).all()
+    assert [r.email for r in rows] == ["multi-1@example.com", "multi-2@example.com"]
+
+
+def test_reuse_crud_object_across_contexts_inserts_two_rows(sa_session: Session) -> None:
+    """Reusing one CRUD instance across contexts should not reuse ORM rows."""
+    CRUD.configure(session_provider=lambda: sa_session, error_policy="raise")
+
+    crud = CRUD(SAUser)
+    with crud:
+        first = crud.add(email="reuse-1@example.com")
+        assert first is not None
+
+    with crud:
+        second = crud.add(email="reuse-2@example.com")
+        assert second is not None
+
+    assert first.id != second.id
+    rows = sa_session.query(SAUser).order_by(SAUser.id).all()
+    assert [r.email for r in rows] == ["reuse-1@example.com", "reuse-2@example.com"]
+
+
+def test_add_merges_before_updating_detached_source_object() -> None:
+    """add(instance=..., **kwargs) should update managed row, not mutate detached source."""
+    engine = create_engine("sqlite:///:memory:", echo=False, future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    source_session = SessionLocal()
+    target_session = SessionLocal()
+
+    try:
+        source_obj = SAUser(email="source@example.com")
+        source_session.add(source_obj)
+        source_session.commit()
+        source_session.expunge(source_obj)
+
+        CRUD.configure(session_provider=lambda: target_session, error_policy="raise")
+        with CRUD(SAUser) as crud:
+            merged = crud.add(instance=source_obj, email="managed@example.com")
+            assert merged is not None
+            assert merged.id == source_obj.id
+            assert merged.email == "managed@example.com"
+
+        assert source_obj.email == "source@example.com"
+        saved = target_session.query(SAUser).filter_by(id=source_obj.id).first()
+        assert saved is not None
+        assert saved.email == "managed@example.com"
+    finally:
+        source_session.close()
+        target_session.close()
+        engine.dispose()
+
+
+def test_add_unknown_field_raises_attribute_error(sa_session: Session) -> None:
+    """Unknown update fields should fail fast instead of silently attaching attrs."""
+    CRUD.configure(session_provider=lambda: sa_session, error_policy="raise")
+
+    source = SAUser(email="known@example.com")
+    with pytest.raises(AttributeError):
+        with CRUD(SAUser) as crud:
+            crud.add(instance=source, typo_field="x")
+
+
+def test_paginate_without_flask_sqlalchemy(sa_session: Session) -> None:
+    """paginate() should work without Flask-SQLAlchemy-specific Query extensions."""
+    CRUD.configure(session_provider=lambda: sa_session, error_policy="raise")
+
+    with CRUD(SAUser) as crud:
+        for idx in range(1, 6):
+            row = crud.add(email=f"page-{idx}@example.com")
+            assert row is not None
+
+    with CRUD(SAUser) as crud:
+        page1 = crud.query().order_by(SAUser.id).paginate(page=1, per_page=2)
+        assert [u.email for u in page1.items] == [
+            "page-1@example.com",
+            "page-2@example.com",
+        ]
+        assert page1.total == 5
+        assert page1.pages == 3
+        assert page1.has_prev is False
+        assert page1.has_next is True
+        assert page1.prev_num is None
+        assert page1.next_num == 2
+
+        page3 = crud.query().order_by(SAUser.id).paginate(page=3, per_page=2)
+        assert [u.email for u in page3.items] == ["page-5@example.com"]
+        assert page3.has_prev is True
+        assert page3.has_next is False
+        assert page3.prev_num == 2
+        assert page3.next_num is None
+
+        page2_no_count = crud.query().order_by(SAUser.id).paginate(
+            page=2,
+            per_page=2,
+            count=False,
+        )
+        assert [u.email for u in page2_no_count.items] == [
+            "page-3@example.com",
+            "page-4@example.com",
+        ]
+        assert page2_no_count.total is None
+        assert page2_no_count.pages == 0
+        assert page2_no_count.has_prev is True
+        assert page2_no_count.has_next is True
+        assert page2_no_count.prev_num == 1
+        assert page2_no_count.next_num == 3

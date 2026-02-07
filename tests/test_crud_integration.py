@@ -291,18 +291,18 @@ def test_add_many_and_global_filters(app_and_db) -> None:
 
 
 def test_create_instance_and_explicit_commit(app_and_db) -> None:
-    """Cover create_instance(fresh) and explicit commit path."""
+    """Cover create_instance() and explicit commit path."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
     with app.app_context():
         CRUD.configure(session_provider=lambda: db.session, error_policy="raise")
 
-        # create_instance(fresh) 不应绑定 CRUD 实例或 Session
+        # create_instance() 应返回未绑定 Session 的新实例
         crud_tmp = CRUD(User)
-        detached = crud_tmp.create_instance(fresh=True)
-        assert crud_tmp.instance is None
+        detached = crud_tmp.create_instance(email="fresh@example.com")
         assert detached.id is None
+        assert detached.email == "fresh@example.com"
         assert object_session(detached) is None
 
         @CRUD.transaction()
