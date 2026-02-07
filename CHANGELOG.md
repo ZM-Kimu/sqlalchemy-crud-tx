@@ -1,3 +1,9 @@
+## v1.0.0 (2026-02-07)
+
+### Fix
+
+- **core**: fix the unexcept error cause by create_instance
+
 ## v0.3.0 (2026-01-06)
 
 ### BREAKING CHANGE
