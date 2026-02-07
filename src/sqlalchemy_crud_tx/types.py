@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 class ORMModel(Protocol):
     """Minimal capabilities required for ORM models.
 
-    Designed to be compatible with both plain SQLAlchemy and Flask-SQLAlchemy
-    declarative models without importing their concrete base classes.
+    Designed to be compatible with plain SQLAlchemy declarative models
+    without importing concrete base classes.
     """
 
     __table__: ClassVar[Any]
@@ -39,8 +39,7 @@ ErrorLogger = Callable[..., None]
 
 # In this library, ``SessionLike`` is treated as a SQLAlchemy ORM ``Session``
 # or a ``scoped_session[Session]`` wrapper. This lets IDEs and type checkers
-# reuse SQLAlchemy's own type hints while remaining compatible with
-# Flask-SQLAlchemy's scoped sessions.
+# reuse SQLAlchemy's own type hints while keeping runtime integration flexible.
 SessionLike: TypeAlias = _Session | _ScopedSession[_Session]
 
 SessionProvider = Callable[[], SessionLike]

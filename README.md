@@ -2,7 +2,7 @@
 
 English | [中文](README_zh.md)
 
-A lightweight CRUD + transaction helper for SQLAlchemy (Flask glue can be added via extensions):
+A lightweight CRUD + transaction helper for SQLAlchemy:
 - Context-managed CRUD with nested savepoints: `with CRUD(Model) as crud:`
 - Function-level transactions via `@CRUD.transaction()` with join semantics
 - Configurable error policy (`error_policy="raise"|"status_only"`) and pluggable logger
@@ -12,13 +12,11 @@ A lightweight CRUD + transaction helper for SQLAlchemy (Flask glue can be added 
 
 ```bash
 pip install sqlalchemy-crud-tx
-# with Flask integration
-pip install "sqlalchemy-crud-tx[flask]"
 # or local editable install
 pip install -e .
 ```
 
-Requires Python 3.11+ with `sqlalchemy>=1.4` (optional Flask integration can be added separately).
+Requires Python 3.11+ with `sqlalchemy>=1.4`.
 
 ## Quick Start (pure SQLAlchemy)
 
@@ -97,7 +95,6 @@ create_two_users()
 
 ## Notes
 
-- SQLAlchemy-first; optional Flask integration can be layered via extensions.
 - Always call `CRUD.configure(session_provider=...)` before using CRUD instances.
 - If a Session may already be in a transaction (e.g., AUTOBEGIN after
   `expire_on_commit`), set `existing_txn_policy` in `CRUD.configure(...)`
