@@ -17,6 +17,7 @@ Homepage = "https://github.com/ZM-Kimu/sqlalchemy-crud-tx"
 
 [project.optional-dependencies]
 flask = ["flask>=2.3", "flask-sqlalchemy>=3.1"]
+benchmark = ["pytest>=8.0", "pytest-benchmark>=4.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
